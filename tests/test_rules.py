@@ -1214,6 +1214,26 @@ class RuleTests(unittest.TestCase):
         self.assertIn(by_name["Jellyfin"]["state"], ("optional", "ok"))
         self.assertEqual(result["release"], app.APP_RELEASE)
 
+    def test_latest_version_is_read_from_the_project_tags(self):
+        self.assertEqual(app.version_key("v0.10.0"), (0, 10, 0))
+        self.assertGreater(app.version_key("0.10.0"), app.version_key("0.9.9"))       # 按数字比，不是按字符比
+        self.assertIsNone(app.version_key("latest"))
+        class Reply:
+            def __init__(self, data): self.data = data
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return json.dumps(self.data).encode()
+        tags = [{"name": "v0.9.0"}, {"name": "v0.11.2"}, {"name": "nightly"}, {"name": "v0.10.0"}]
+        with patch.object(app.urlrequest, "urlopen", lambda req, timeout=0: Reply(tags)), patch.object(app, "APP_RELEASE", "0.10.0"):
+            result = app.api_latest_version()
+            self.assertEqual((result["latest"], result["newer"]), ("0.11.2", True))
+        with patch.object(app.urlrequest, "urlopen", lambda req, timeout=0: Reply([{"name": "v0.10.0"}])), patch.object(app, "APP_RELEASE", "0.10.0"):
+            self.assertFalse(app.api_latest_version()["newer"])
+        def offline(req, timeout=0):
+            raise OSError("no network")
+        with patch.object(app.urlrequest, "urlopen", offline):
+            self.assertEqual(app.api_latest_version()[1], 502)
+
     def test_space_check_also_looks_at_the_library_disk(self):
         item = {"kind": "file", "size": 20 * 1024 ** 3, "probe": None, "payload": ""}
         with patch.object(app, "disk_free", lambda where=None: 10 * 1024 ** 3 if where is not None else 900 * 1024 ** 3), \
@@ -1568,6 +1588,7 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(cues[0][1], 4_209_464)                              # 清屏后紧跟着下一句：第一句到下一句出现为止
         self.assertEqual(cues[2][1], 4_213_362)                              # 被下一句顶掉
 
+    @unittest.skipUnless(shutil.which("ffprobe"), "需要 ffprobe")
     def test_conversion_saves_subtitle_timing_so_calibration_works_after_the_source_is_gone(self):
         self.movies.mkdir(exist_ok=True)
         dst = self.movies / "Movie.mkv"; dst.write_bytes(b"m")

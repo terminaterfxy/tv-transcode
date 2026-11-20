@@ -6570,6 +6570,34 @@ def api_folder_list():
     return jsonify({"path": path, "parent": ("/" + "/".join(parts[:-1])) if parts else None, "folders": names[:500]})
 
 
+PROJECT_REPO = env_text("PROJECT_REPO", "terminaterfxy/tv-transcode")     # 到哪个 GitHub 仓库查新版本
+
+
+def version_key(text):
+    """把 0.10.0、v0.10.0 这样的版本号变成可以比大小的数字组；不是版本号返回 None。"""
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", str(text or "").strip())
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+@app.get("/api/latest_version")
+def api_latest_version():
+    """查一下项目仓库里最新的版本号。只在用户打开升级窗口时查，不会自己定时联网。"""
+    try:
+        req = urlrequest.Request(f"https://api.github.com/repos/{PROJECT_REPO}/tags?per_page=100",
+                                 headers={"Accept": "application/vnd.github+json", "User-Agent": "tv-transcode"})
+        with urlrequest.urlopen(req, timeout=8) as response:
+            tags = json.loads(response.read() or b"[]")
+    except Exception as exc:
+        return jsonify({"error": f"查不到新版本：{str(exc)[:120]}"}), 502
+    versions = sorted(key for key in (version_key(tag.get("name")) for tag in tags if isinstance(tag, dict)) if key)
+    if not versions:
+        return jsonify({"error": "仓库里还没有发布版本"}), 404
+    latest = ".".join(str(part) for part in versions[-1])
+    current = version_key(APP_RELEASE)
+    return jsonify({"latest": latest, "current": APP_RELEASE, "newer": bool(current and versions[-1] > current),
+                    "url": f"https://github.com/{PROJECT_REPO}/releases"})
+
+
 def tool_version(command):
     """跑一下工具的版本命令，返回第一行；跑不起来返回 None。"""
     try:
@@ -7696,7 +7724,8 @@ EN_TEXT = {
     "包括带 Atmos 元数据的 TrueHD 音轨。": "Includes TrueHD tracks with Atmos metadata.",
     "包括 Dolby Digital Plus Atmos。": "Includes Dolby Digital Plus Atmos.", "MP4 输出只保留兼容轨。": "MP4 output keeps only the compatible track.",
     "匹配上方未列出的编码。": "Matches codecs not listed above.",
-    "切换语言": "Switch language", "运行环境": "Environment", "面板依赖的工具和服务。": "Tools and services the panel depends on.",
+    "切换语言": "Switch language", "正在检查新版本…": "Checking for a new version…", "已是最新版本": "Up to date",
+    "有新版本 ": "New version ", "查看": "View", "查不到新版本": "Could not check for a new version", "运行环境": "Environment", "面板依赖的工具和服务。": "Tools and services the panel depends on.",
     "正在检查…": "Checking…", "项目": "Item", "状态": "Status", "详情": "Details", "正常": "OK", "缺失": "Missing", "不可用": "Unavailable",
     "读盘工具（MakeMKV）": "Disc tool (MakeMKV)", "成品文件归属": "Output file owner", "检查失败": "Check failed",
     "操作失败": "Action failed", "改名失败": "Rename failed", "更新失败": "Update failed", "状态接口异常": "Status API error",
@@ -7944,7 +7973,7 @@ table{width:100%;border-collapse:collapse}
 .dialog-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:24px}
 .subtitle-picker-actions{justify-content:space-between}
 .delete-name{margin:14px 0;padding:11px 14px;border-radius:12px;background:var(--tile);font-size:13px;line-height:1.5;overflow-wrap:anywhere}
-.sub-note{margin:4px 0 0!important;color:var(--muted);font-size:13px!important}
+.sub-note{margin:4px 0 0!important;color:var(--muted);font-size:13px!important}.sub-note a{color:var(--accent)}
 .sub-head{display:flex;align-items:center;justify-content:space-between;margin:22px 0 0;font-size:13px;font-weight:600;color:var(--muted)}
 .subtitle-list{display:grid;gap:8px;max-height:min(420px,52vh);overflow:auto;margin-top:10px}
 .sub-row{display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:12px;background:var(--tile);animation:rise .2s ease both}
@@ -8125,6 +8154,7 @@ table{width:100%;border-collapse:collapse}
   <div class="dialog">
     <h2 id="upgradeTitle">升级</h2>
     <p class="sub-note" id="upgradeVersion"></p>
+    <p class="sub-note" id="upgradeLatest"></p>
     <p>选择新版 app.py。升级期间页面短暂断开；失败自动回退。</p>
     <div class="file-grid single">
       <label class="file-field"><span>新版 app.py</span>
@@ -9008,7 +9038,17 @@ $('#subtitleSyncConfirm').onclick=async()=>{
   $('#subtitleSyncModal').classList.remove('open');
   await action(firstStart);
 };
+async function checkLatestVersion(){
+  const box=$('#upgradeLatest');box.textContent='正在检查新版本…';box.className='sub-note';
+  try{
+    const r=await fetch('/api/latest_version'),res=await r.json();
+    if(!r.ok)throw new Error(res.error||'查不到新版本');
+    box.innerHTML=res.newer?'有新版本 <span data-no-translate>'+esc(res.latest)+'</span> · <a href="'+esc(res.url)+'" target="_blank" rel="noopener">查看</a>':'已是最新版本';
+    box.classList.toggle('env-warn',!!res.newer);
+  }catch(error){box.textContent=error.message}
+}
 $('#upgradeOpen').onclick=()=>{
+  checkLatestVersion();
   $('#upgradeModal').classList.add('open');$('#upgradeCancel').focus();renderUpgrade();
 };
 function closeUpgrade(){$('#upgradeModal').classList.remove('open')}
@@ -9123,7 +9163,7 @@ tick();setInterval(tick,2500);
 </script></body></html>"""
 
 
-APP_RELEASE = "0.10.0"        # 给人看的版本号：改了功能就加；下面的指纹是这份文件内容算出来的，用来确认装上的就是这一份
+APP_RELEASE = "0.10.1"        # 给人看的版本号：改了功能就加；下面的指纹是这份文件内容算出来的，用来确认装上的就是这一份
 
 
 def _app_version():
