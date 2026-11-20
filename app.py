@@ -1708,6 +1708,51 @@ def audio_choice_label(track):
     return " · ".join(part for part in parts if part)
 
 
+def media_badges(probe, audio_track=None):
+    """卡片上一眼能看懂的小标签：清晰度、动态范围、音质。
+
+    用的是电视和片源介绍里常见的叫法（4K、杜比视界、HDR10、杜比全景声），每个带一个类别给页面上色。
+    audio_track 是电视上会播的那条音轨；不给时取音质最高的正片音轨。
+    """
+    video = (probe or {}).get("video")
+    if not video:
+        return []
+    badges = []
+    width, height = int(video.get("width") or 0), int(video.get("height") or 0)
+    if width >= 3800 or height >= 2100:
+        badges.append({"text": "4K", "kind": "res"})
+    elif width >= 1900 or height >= 1060:
+        badges.append({"text": "1080p", "kind": "res"})
+    elif width >= 1260 or height >= 700:
+        badges.append({"text": "720p", "kind": "res"})
+    transfer = video.get("color_transfer", "")
+    if int(video.get("dv_profile", 0) or 0):
+        badges.append({"text": "杜比视界", "kind": "dv"})
+    elif transfer == "smpte2084":
+        badges.append({"text": "HDR10", "kind": "hdr"})
+    elif transfer == "arib-std-b67":
+        badges.append({"text": "HLG", "kind": "hdr"})
+    elif video.get("dynamic_range_known") is not False:
+        badges.append({"text": "SDR", "kind": "plain"})
+    tracks = [t for t in (probe.get("audio") or []) if not is_commentary(t)]
+    track = audio_track or (max(tracks, key=audio_quality_score) if tracks else None)
+    if track:
+        codec = str(track.get("codec") or "").lower()
+        profile = str(track.get("profile") or "") + " " + str(track.get("title") or "")
+        if re.search(r"atmos", profile, re.I):
+            badges.append({"text": "杜比全景声", "kind": "audio"})
+        elif codec == "dts" and re.search(r"DTS:?X", profile, re.I):
+            badges.append({"text": "DTS:X", "kind": "audio"})
+        elif (codec in ("truehd", "mlp", "flac") or codec.startswith("pcm_")
+              or (codec == "dts" and re.search(r"\bMA\b|Master", profile, re.I))):
+            badges.append({"text": "无损音质", "kind": "audio"})
+        channels = int(track.get("channels") or 0)
+        layout = {8: "7.1", 7: "6.1", 6: "5.1", 2: "立体声", 1: "单声道"}.get(channels)
+        if layout:
+            badges.append({"text": layout, "kind": "plain"})
+    return badges
+
+
 def sub_choice_label(track):
     """下拉框里给人看的字幕名：只说语言和用途。"""
     language = LANGUAGE_LABELS.get(str(track.get("lang") or "und").lower(), str(track.get("lang") or "und"))
@@ -2920,6 +2965,7 @@ def output_info_lines(path):
         if len(tracks) > 1:
             audio += f" 等 {len(tracks)} 条"
     else:
+        pick = None
         audio = "没有声音"
     embedded = len(probe.get("subs") or [])
     # Jellyfin 自己下载的字幕默认存在它的资料目录里，不在影片旁边；按它报的条数算，卡片才对得上
@@ -2930,7 +2976,8 @@ def output_info_lines(path):
     parts = ([f"外挂 {external} 条"] if external else []) + ([f"影片里 {embedded} 条"] if embedded else [])
     if external is None:
         parts.append("无法读取外挂字幕目录")
-    return {"picture": picture, "audio": audio, "subs": "，".join(parts) or "没有字幕"}
+    return {"picture": picture, "audio": audio, "subs": "，".join(parts) or "没有字幕",
+            "badges": media_badges(probe, pick)}
 
 
 LIBRARY_KIND = "library"
@@ -4380,9 +4427,13 @@ def tracked_movie_output(name):
 
 def apply_candidate_as_sidecar(
     name, filename, candidate_cues, confirm_audio=False,
-    manual_offset_seconds=None, manual_first_start_ms=None, auto=False,
+    manual_offset_seconds=None, manual_first_start_ms=None, auto=False, target=None,
 ):
-    """为已完成影片即时生成外置中文 SRT；绝不改写视频文件。"""
+    """给已入库影片的一份外挂字幕校准时间；绝不改写视频文件。
+
+    target 是校准结果写到哪个文件：校准影片旁边已有的字幕时就写回它自己（可以反复校准）；
+    不给时写到“片名.zh-CN.srt”（来源是 Jellyfin 资料目录里的字幕，面板改不了那里的文件）。
+    """
     output = tracked_movie_output(name)
     if not output:
         raise ValueError("当前成品不存在，无法即时应用字幕")
@@ -4514,7 +4565,8 @@ def apply_candidate_as_sidecar(
             )
         # 校轴成功后才覆盖已选字幕记录和 Movies 外置字幕，避免误选破坏旧版本。
         save_subtitle_candidate(name, filename, cues=candidate_cues)
-        target = subtitle_sidecar_path(output)
+        in_place = target is not None
+        target = Path(target) if in_place else subtitle_sidecar_path(output)
         staging = target.with_name(f".{target.name}.tmp")
         try:
             shutil.copy2(aligned, staging)
@@ -4523,7 +4575,7 @@ def apply_candidate_as_sidecar(
         finally:
             staging.unlink(missing_ok=True)
         with LOCK:
-            if name in PROCESSED:
+            if name in PROCESSED and not in_place:
                 PROCESSED[name]["subtitle_sidecar"] = str(target)
                 save_state()
         clear_subtitle_audio_preview(name)
@@ -4542,7 +4594,7 @@ def apply_candidate_as_sidecar(
 
 def store_candidate_for_item(
     name, filename, data, confirm_audio=False, manual_offset_seconds=None,
-    manual_first_start_ms=None, auto=False,
+    manual_first_start_ms=None, auto=False, target=None,
 ):
     """待处理任务保存候选；已完成任务则即时校轴成外置字幕。"""
     candidate_cues = parse_subtitle_candidate_data(data)
@@ -4552,7 +4604,7 @@ def store_candidate_for_item(
         applied = apply_candidate_as_sidecar(
             name, filename, candidate_cues, confirm_audio=confirm_audio,
             manual_offset_seconds=manual_offset_seconds,
-            manual_first_start_ms=manual_first_start_ms, auto=auto,
+            manual_first_start_ms=manual_first_start_ms, auto=auto, target=target,
         )
         if applied.get("confirmation_required"):
             return {
@@ -5756,6 +5808,8 @@ def api_state():
             d["done_verdict"] = processed.get("verdict")
             d["sidecar_count"] = len(processed.get("sidecars") or [])
             d["info"] = output_info_lines(output) if (output and it["status"] == "done") else None
+            # 小标签：入库的按成品算（电视上实际播的），还没转换的按片源算
+            d["badges"] = (d["info"] or {}).get("badges") if it["status"] == "done" else media_badges(it.get("probe"))
             d["deletable"] = (it["status"] == "done" and bool(processed.get("source_snapshot"))
                               and not block_reason)
             d["delete_block_reason"] = (
@@ -5821,6 +5875,7 @@ def api_state():
             "processing_block_reason": block_reason,
             "makemkv_update": dict(MAKEMKV_UPDATE),
             "app_version": globals().get("APP_VERSION", ""),
+            "help_url": f"https://github.com/{PROJECT_REPO}/blob/main/使用说明.md",
             "jellyfin_link": env_text("JELLYFIN_PUBLIC_URL"), "jellyfin_port": JELLYFIN_PORT,
             "folders": {"inbox": INBOX.name, "library": MOVIES.name, **{key + "_path": value for key, value in current_folders().items()}},
             "release": globals().get("APP_RELEASE", ""),
@@ -6406,19 +6461,34 @@ def api_jellyfin_subtitle_candidate():
         if it["status"] in {"processing", "queued"}:
             return jsonify({"error": "任务正在运行或排队，暂时不能替换字幕"}), 409
     if not subtitle_id:
-        return jsonify({"error": "请选择一份 Jellyfin 字幕"}), 400
+        return jsonify({"error": "请选择一份字幕"}), 400
+    target = jellyfin_path = None
     try:
-        filename, data = jellyfin_subtitle_bytes(subtitle_id)
+        if str(subtitle_id).startswith(LOCAL_SUBTITLE_PREFIX):
+            # 影片旁边的字幕：读它、校准后写回它自己，所以可以一遍遍校准
+            output = tracked_movie_output(name)
+            beside = {f.name: f for f in local_sidecars(output)} if output else {}
+            target = beside.get(str(subtitle_id)[len(LOCAL_SUBTITLE_PREFIX):])
+            if target is None or target.suffix.lower() != ".srt":
+                return jsonify({"error": "这份字幕已经不在了，请重新打开窗口"}), 409
+            filename, data = target.name, target.read_bytes()
+        else:
+            filename, data = jellyfin_subtitle_bytes(subtitle_id)
+            with LOCK:
+                jellyfin_path = JELLYFIN_SUBTITLE_INDEX.get(subtitle_id)
         result = store_candidate_for_item(
             name, filename, data, confirm_audio=confirm_audio,
             manual_offset_seconds=manual_offset_seconds,
             manual_first_start_ms=manual_first_start_ms,
-            auto=payload.get("auto") is True,
+            auto=payload.get("auto") is True, target=target,
         )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    except RuntimeError as exc:
+    except (RuntimeError, OSError) as exc:
         return jsonify({"error": str(exc)}), 503
+    if result.get("applied") and jellyfin_path:
+        # 校准好的那份已经放在影片旁边了：把 Jellyfin 里没校准的原件删掉，免得列表里有两份、电视上选错
+        remove_jellyfin_subtitle(name, jellyfin_path)
     cue_count = result["cue_count"]
     if result.get("confirmation_required"):
         message = (
@@ -6430,10 +6500,7 @@ def api_jellyfin_subtitle_candidate():
             if str(result.get("alignment_method", "")).startswith("manual")
             else "影片自带字幕的时间点"
         )
-        message = (
-            f"已按{method}生成外置中文字幕 {result['sidecar']}；"
-            "视频无需重新转换"
-        )
+        message = f"已按{method}校准：{result['sidecar']}"
     else:
         message = (
             f"已从 Jellyfin 保存 {cue_count} 个中文字幕段；"
@@ -7288,6 +7355,27 @@ def jellyfin_subtitle_streams(ctx, movie):
     return [stream for stream in streams if stream.get("Type") == "Subtitle"]
 
 
+LOCAL_SUBTITLE_PREFIX = "local:"     # “校准时间”认的编号：影片旁边的字幕用“local:文件名”
+
+
+def remove_jellyfin_subtitle(name, path):
+    """让 Jellyfin 删掉它资料目录里的一份外挂字幕。删不掉不算错（只是列表里多一份）。"""
+    try:
+        ctx, error = subtitle_request_context({"name": name})
+        if error:
+            return False
+        movie = jellyfin_movie_or_error(ctx)
+        stream = next((s for s in jellyfin_subtitle_streams(ctx, movie)
+                       if s.get("IsExternal") and str(s.get("Path") or "") == path), None)
+        if not stream:
+            return False
+        jellyfin_call(ctx["base"], ctx["key"], "DELETE", f"/Videos/{movie['Id']}/Subtitles/{stream['Index']}")
+        return True
+    except Exception as exc:
+        print(f"删除 Jellyfin 里未校准的字幕失败: {exc}", flush=True)
+        return False
+
+
 def subtitle_sync_id(path):
     """这份字幕能不能交给“校准时间”用：要是 Jellyfin 资料目录里的文字字幕。返回旧校准流程认的编号。"""
     path = str(path or "")
@@ -7359,6 +7447,8 @@ def api_subtitles_list():
                  "beside_movie": filename in beside, "when": "", "size_h": ""}
         if filename in beside:
             stat = beside[filename].stat()
+            if filename.lower().endswith(".srt"):
+                entry["sync_id"] = LOCAL_SUBTITLE_PREFIX + filename
             entry.update(when=time.strftime("%m-%d %H:%M", time.localtime(stat.st_mtime)), size_h=human(stat.st_size),
                          origin="校准后的" if filename == calibrated else
                          ("转换时从影片里取出的" if filename in exported else "放在影片旁边的"))
@@ -7724,7 +7814,23 @@ EN_TEXT = {
     "包括带 Atmos 元数据的 TrueHD 音轨。": "Includes TrueHD tracks with Atmos metadata.",
     "包括 Dolby Digital Plus Atmos。": "Includes Dolby Digital Plus Atmos.", "MP4 输出只保留兼容轨。": "MP4 output keeps only the compatible track.",
     "匹配上方未列出的编码。": "Matches codecs not listed above.",
-    "切换语言": "Switch language", "正在检查新版本…": "Checking for a new version…", "已是最新版本": "Up to date",
+    "切换语言": "Switch language", "杜比全景声": "Dolby Atmos", "无损音质": "Lossless", "使用说明": "Guide", "入库之后": "After import", "电视播放不正常": "If playback is wrong on your TV",
+    "Jellyfin 的媒体库指向“影片文件夹”；下载工具的保存位置设为“下载文件夹”。两个文件夹在“媒体目录”里查看和修改。":
+        "Point the Jellyfin library at the Library folder and your download tool at the Download folder. Both are shown and changed under Folders.",
+    "把影片下载到“下载文件夹”。下载完成后，“影片”页自动出现一张卡片。": "Download a movie into the Download folder. When it finishes, a card appears on the Movies page.",
+    "看卡片": "Read the card",
+    "右上角是结论：必须转换、建议转换或不用转换。中间三块是现在直接播会怎样、转换后会怎样、转换的代价。":
+        "The badge is the verdict: must convert, should convert, or no conversion needed. The three tiles say what happens now, after converting, and what it costs.",
+    "选音轨和字幕": "Pick audio and subtitles", "卡片下方已按“默认选轨”预选好，一般不用改。": "Already preselected by the Defaults rules; usually nothing to change.",
+    "点“排队转换”，成品放进“影片文件夹”。不用转换的点“直接入库”。": "Click Queue; the output goes to the Library folder. If no conversion is needed, click Import as is.",
+    "在电视上确认": "Check on the TV", "等 Jellyfin 扫描到成品，在电视上播放，确认画面、声音、字幕正常。": "Wait for Jellyfin to scan the output, then play it on the TV and check picture, audio and subtitles.",
+    "确认无误后，在卡片上点“删除源文件”。删除后无法恢复。成品有问题时点“删除成品重做”，源文件保留。":
+        "When it is fine, click Delete source on the card. This cannot be undone. If the output is wrong, click Delete output & redo; the source is kept.",
+    "卡片上可以改名、搜索或上传中文字幕、校准字幕时间。字幕对不上时点“校准时间”，可以反复校准。":
+        "On the card you can rename, search or upload Chinese subtitles, and sync subtitle timing. Sync timing can be repeated.",
+    "默认规则来自 LG G5 的实测，其他电视可能不同。到“视频封装”“音轨处理”“字幕封装”里改规则，再“删除成品重做”。":
+        "Default rules come from tests on an LG G5; other TVs may differ. Change the rules under Video, Audio and Subtitles, then Delete output & redo.",
+    "完整说明（安装、升级、常见问题）": "Full guide (install, upgrade, FAQ; in Chinese)", "正在检查新版本…": "Checking for a new version…", "已是最新版本": "Up to date",
     "有新版本 ": "New version ", "查看": "View", "查不到新版本": "Could not check for a new version", "运行环境": "Environment", "面板依赖的工具和服务。": "Tools and services the panel depends on.",
     "正在检查…": "Checking…", "项目": "Item", "状态": "Status", "详情": "Details", "正常": "OK", "缺失": "Missing", "不可用": "Unavailable",
     "读盘工具（MakeMKV）": "Disc tool (MakeMKV)", "成品文件归属": "Output file owner", "检查失败": "Check failed",
@@ -7851,6 +7957,13 @@ input[type=checkbox]{accent-color:var(--btn);width:15px;height:15px;margin:0}
 .vbadge.v-should{background:color-mix(in srgb,var(--warn) 15%,transparent);color:var(--warn)}
 .vbadge.v-none,.vbadge.v-done{background:color-mix(in srgb,var(--ok) 15%,transparent);color:var(--ok)}
 .mc-pic{margin-top:6px;color:var(--muted);font-size:13px}
+.mc-badges{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.qb{height:20px;padding:0 7px;border-radius:5px;display:inline-flex;align-items:center;font-size:11px;font-weight:700;letter-spacing:.02em;
+  border:1px solid var(--line2);color:var(--muted);white-space:nowrap}
+.qb-res{border-color:var(--text2);color:var(--text)}
+.qb-dv{border-color:transparent;background:linear-gradient(90deg,#7b5cff,#e0457b);color:#fff}
+.qb-hdr{border-color:transparent;background:var(--warn);color:#fff}
+.qb-audio{border-color:var(--accent);color:var(--accent)}
 .mc-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-top:18px}
 .mc-col{background:var(--tile);border-radius:14px;padding:14px 16px 15px}
 .mc-col b{display:block;margin-bottom:6px;font-size:12px;font-weight:600;color:var(--muted)}
@@ -7950,6 +8063,13 @@ table{width:100%;border-collapse:collapse}
 .rule-split tr.group-more>td{padding-top:3px}
 .rule-matrix .output{white-space:nowrap}
 .rule-do{color:var(--warn);font-weight:600}.rule-skip{color:var(--muted)}
+.help-steps{margin:0;padding:0;list-style:none;counter-reset:step}
+.help-steps li{counter-increment:step;display:grid;grid-template-columns:28px 130px minmax(0,1fr);gap:12px;align-items:baseline;padding:14px 0;border-top:1px solid var(--line)}
+.help-steps li::before{content:counter(step);width:24px;height:24px;border-radius:50%;display:grid;place-items:center;background:var(--ctl);
+  color:var(--muted);font-size:12px;font-weight:600}
+.help-steps b{font-size:15px;font-weight:600}.help-steps span{color:var(--text2);font-size:14px}
+.rules-caption a{color:var(--accent)}
+@media(max-width:860px){.help-steps li{grid-template-columns:28px minmax(0,1fr)}.help-steps span{grid-column:2}}
 .env-table th:nth-child(1){width:24%}.env-table th:nth-child(2){width:12%}
 .env-ok,.env-bad,.env-warn{font-weight:600}.env-ok{color:var(--ok)}.env-bad{color:var(--danger)}.env-warn{color:var(--warn)}
 .rules-reset{display:flex;margin:26px 0 0 auto}
@@ -8422,6 +8542,7 @@ function renderRows(){
     const warnings=(it.warnings||[]).map(w=>'<div class="message warn">⚠ '+esc(w)+'</div>').join('');
     const html='<div class="mc-top"><div class="mc-name">'+esc(it.library?it.name.slice(4).split('/')[0]:it.name)+'</div>'+
       '<span class="mc-size">'+esc(it.size_h)+'</span><span class="vbadge '+b[0]+'">'+esc(b[1])+'</span></div>'+
+      ((it.badges||[]).length?'<div class="mc-badges">'+it.badges.map(x=>'<span class="qb qb-'+esc(x.kind)+'">'+esc(x.text)+'</span>').join('')+'</div>':'')+
       errors+warnings+cardBody(it);
     // 其他影片在下载或排队时，保留这张卡片正在操作的控件。
     const editing=row.contains(document.activeElement)&&document.activeElement.tagName==='SELECT'&&row.dataset.status===it.status;
@@ -8789,7 +8910,8 @@ const ruleSections={
   '字幕':['字幕封装','外挂文件与影片同目录，文件名以片名开头。'],
   '默认保留':['默认选轨','转换前可在影片卡片上改选。'],
   '文件夹':['媒体目录','可选 NAS 上的任意文件夹。两个文件夹不能相同或互相包含。保存后面板重启。'],
-  '环境':['运行环境','面板依赖的工具和服务。']
+  '环境':['运行环境','面板依赖的工具和服务。'],
+  '说明':['使用说明','']
 };
 function ruleNow(row){return {...row,...rulesDraft[row.id]}}
 function editRule(row,key,value){
@@ -8906,8 +9028,9 @@ function rulePreview(rows){
     ['字幕',esc(example.subs_source),esc(example.subs[subs])]]);
 }
 function renderRuleContent(){
-  document.querySelector('.rules-foot').hidden=rulesGroup===ENV_GROUP;      // 运行环境页只看不改，不显示保存栏
+  document.querySelector('.rules-foot').hidden=[ENV_GROUP,HELP_GROUP].includes(rulesGroup);   // 这两页只看不改，不显示保存栏
   if(rulesGroup===ENV_GROUP){renderEnvironment();return}
+  if(rulesGroup===HELP_GROUP){renderHelp();return}
   const rows=rulesData.rows.filter(r=>r.group===rulesGroup),[title,description]=ruleSections[rulesGroup];
   const matrix=rulesGroup==='声音'||rulesGroup==='字幕';
   const notes=rows.filter(r=>!r.note_fixed&&!r.note_only);
@@ -8935,9 +9058,25 @@ async function renderEnvironment(){
       '</tbody></table></div>';
   }catch(error){if(rulesGroup===ENV_GROUP)body.querySelector('.subtitle-list-status').textContent=error.message}
 }
-const ENV_GROUP='环境';
+const ENV_GROUP='环境',HELP_GROUP='说明';
+// 使用说明：写在面板里，只装了镜像、没看过项目主页的人也能看到
+const HELP_STEPS=[
+  ['下载','把影片下载到“下载文件夹”。下载完成后，“影片”页自动出现一张卡片。'],
+  ['看卡片','右上角是结论：必须转换、建议转换或不用转换。中间三块是现在直接播会怎样、转换后会怎样、转换的代价。'],
+  ['选音轨和字幕','卡片下方已按“默认选轨”预选好，一般不用改。'],
+  ['转换','点“排队转换”，成品放进“影片文件夹”。不用转换的点“直接入库”。'],
+  ['在电视上确认','等 Jellyfin 扫描到成品，在电视上播放，确认画面、声音、字幕正常。'],
+  ['删除源文件','确认无误后，在卡片上点“删除源文件”。删除后无法恢复。成品有问题时点“删除成品重做”，源文件保留。']
+];
+function renderHelp(){
+  $('#rulesBody').innerHTML='<h2>使用说明</h2><p class="rules-intro">Jellyfin 的媒体库指向“影片文件夹”；下载工具的保存位置设为“下载文件夹”。两个文件夹在“媒体目录”里查看和修改。</p>'+
+    '<ol class="help-steps">'+HELP_STEPS.map(([title,text])=>'<li><b>'+title+'</b><span>'+text+'</span></li>').join('')+'</ol>'+
+    '<h3>入库之后</h3><p class="rules-caption">卡片上可以改名、搜索或上传中文字幕、校准字幕时间。字幕对不上时点“校准时间”，可以反复校准。</p>'+
+    '<h3>电视播放不正常</h3><p class="rules-caption">默认规则来自 LG G5 的实测，其他电视可能不同。到“视频封装”“音轨处理”“字幕封装”里改规则，再“删除成品重做”。</p>'+
+    (state.help_url?'<p class="rules-caption"><a href="'+esc(state.help_url)+'" target="_blank" rel="noopener">完整说明（安装、升级、常见问题）</a></p>':'');
+}
 function renderRules(){
-  const groups=rulesData.groups.concat(ENV_GROUP);
+  const groups=rulesData.groups.concat(ENV_GROUP,HELP_GROUP);
   if(!groups.includes(rulesGroup))rulesGroup=groups[0];
   $('#rulesNav').innerHTML=groups.map(g=>'<button type="button" data-group="'+esc(g)+'"'+
     (g===rulesGroup?' class="active" aria-current="page"':'')+'>'+esc(ruleSections[g][0])+'<small></small></button>').join('');
@@ -9163,7 +9302,7 @@ tick();setInterval(tick,2500);
 </script></body></html>"""
 
 
-APP_RELEASE = "0.10.1"        # 给人看的版本号：改了功能就加；下面的指纹是这份文件内容算出来的，用来确认装上的就是这一份
+APP_RELEASE = "0.10.2"        # 给人看的版本号：改了功能就加；下面的指纹是这份文件内容算出来的，用来确认装上的就是这一份
 
 
 def _app_version():

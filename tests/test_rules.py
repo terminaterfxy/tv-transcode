@@ -1214,6 +1214,24 @@ class RuleTests(unittest.TestCase):
         self.assertIn(by_name["Jellyfin"]["state"], ("optional", "ok"))
         self.assertEqual(result["release"], app.APP_RELEASE)
 
+    def test_cards_carry_quality_badges(self):
+        def texts(media, track=None):
+            return [b["text"] for b in app.media_badges(media, track)]
+        uhd_dv = {"video": {"width": 3840, "height": 2160, "dv_profile": 8, "color_transfer": "smpte2084"},
+                  "audio": [audio("eac3", channels=6, title="Dolby Digital Plus Atmos"), audio("ac3", channels=2, title="Commentary")]}
+        self.assertEqual(texts(uhd_dv), ["4K", "杜比视界", "杜比全景声", "5.1"])
+        hdr = {"video": {"width": 3840, "height": 1600, "dv_profile": 0, "color_transfer": "smpte2084"},
+               "audio": [audio("truehd", channels=8), audio("ac3", channels=6)]}
+        self.assertEqual(texts(hdr), ["4K", "HDR10", "无损音质", "7.1"])                      # 不指定时取音质最高的那条
+        self.assertEqual(texts(hdr, hdr["audio"][1]), ["4K", "HDR10", "5.1"])                # 指定了电视会播的那条
+        wide_sdr = {"video": {"width": 3840, "height": 2160, "dv_profile": 0, "color_transfer": "bt2020-10"},
+                    "audio": [audio("pcm_s24le", channels=6)]}
+        self.assertEqual(texts(wide_sdr), ["4K", "SDR", "无损音质", "5.1"])                   # 4K 广色域但不是 HDR：实测过的那张盘
+        hd = {"video": {"width": 1920, "height": 1080, "dv_profile": 0, "color_transfer": "bt709"}, "audio": [audio("aac", channels=2)]}
+        self.assertEqual(texts(hd), ["1080p", "SDR", "立体声"])
+        self.assertEqual(app.media_badges(None), [])
+        self.assertIn("mc-badges", app.PAGE)
+
     def test_latest_version_is_read_from_the_project_tags(self):
         self.assertEqual(app.version_key("v0.10.0"), (0, 10, 0))
         self.assertGreater(app.version_key("0.10.0"), app.version_key("0.9.9"))       # 按数字比，不是按字符比
@@ -1708,6 +1726,33 @@ class RuleTests(unittest.TestCase):
         # 片段总时长和播放列表对不上：放弃，不给错的参照
         with patch.object(app, "_subtitle_packets", side_effect=[first, second]):
             self.assertEqual(app.disc_subtitle_time_points(["a", "b"], 9000.0), [])
+
+    def test_a_subtitle_beside_the_movie_is_calibrated_in_place_again_and_again(self):
+        # 用户反馈：校准后那份没有“校准时间”按钮，还另外多出一个文件。现在写回原文件，可以一遍遍校准
+        self.movies.mkdir(exist_ok=True)
+        output = self.movies / "movie.mkv"; output.write_bytes(b"v")
+        app.ITEMS["m"] = {"name": "m", "status": "done", "kind": "file"}; app.PROCESSED["m"] = {"output": str(output)}
+        beside = self.movies / "movie.chi.srt"
+        app.write_srt(beside, [{"start": 10_000 + i * 4_000, "end": 11_500 + i * 4_000, "text": f"句{i}"} for i in range(8)])
+        def calibrate(first_ms):
+            body = {"name": "m", "subtitle_id": app.LOCAL_SUBTITLE_PREFIX + "movie.chi.srt", "confirm_audio": True,
+                    "manual_first_start_ms": first_ms}
+            with patch.object(app, "request", types.SimpleNamespace(get_json=lambda **kw: body, host="")), \
+                    patch.object(app, "ffprobe", lambda path: None), patch.object(app, "refresh_jellyfin_for", lambda name: True):
+                return app.api_jellyfin_subtitle_candidate()
+        first = calibrate(25_000)
+        self.assertTrue(first["applied"]); self.assertEqual(first["sidecar"], "movie.chi.srt")
+        self.assertAlmostEqual(app.parse_srt_text(beside.read_text("utf-8"))[0]["start"], 25_000, delta=2)
+        second = calibrate(31_500)                                             # 再校一次：还是这个文件
+        self.assertEqual(second["sidecar"], "movie.chi.srt")
+        cues = app.parse_srt_text(beside.read_text("utf-8"))
+        self.assertAlmostEqual(cues[0]["start"], 31_500, delta=2)
+        self.assertAlmostEqual(cues[-1]["start"] - cues[0]["start"], 28_000, delta=2)   # 只平移，间隔不变
+        self.assertEqual(sorted(p.name for p in self.movies.iterdir()), ["movie.chi.srt", "movie.mkv"])   # 没有多出文件
+        self.assertNotIn("subtitle_sidecar", app.PROCESSED["m"])
+        body = {"name": "m", "subtitle_id": app.LOCAL_SUBTITLE_PREFIX + "../x.srt", "confirm_audio": True}
+        with patch.object(app, "request", types.SimpleNamespace(get_json=lambda **kw: body, host="")):
+            self.assertEqual(app.api_jellyfin_subtitle_candidate()[1], 409)     # 只认影片旁边的字幕
 
     def test_manual_first_line_keeps_the_stretch_found_automatically(self):
         # 自动算出要拉伸千分之一时，用户再手动改第一句的时间：只挪位置，拉伸要留着
