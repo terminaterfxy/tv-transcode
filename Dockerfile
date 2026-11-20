@@ -1,19 +1,8 @@
 FROM python:3.11-slim
 RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-      ffmpeg mkvtoolnix \
-      tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-chi-tra tesseract-ocr-eng \
-      tesseract-ocr-jpn tesseract-ocr-kor \
-      libgl1 libglib2.0-0 \
+ && apt-get install -y --no-install-recommends ffmpeg mkvtoolnix \
  && rm -rf /var/lib/apt/lists/*
-# pgsrip 把 ISO 639-3 中文码 zho 直接交给 Tesseract；Debian 的模型文件却叫
-# chi_sim.traineddata。补一个同目录别名，否则“中文包明明安装了”仍会 OCR 失败。
-RUN set -eux; \
-    chi_sim="$(find /usr/share/tesseract-ocr -name chi_sim.traineddata -print -quit)"; \
-    test -n "$chi_sim"; \
-    ln -sf "$(basename "$chi_sim")" "$(dirname "$chi_sim")/zho.traineddata"
-RUN pip install --no-cache-dir \
-      flask docker pgsrip==0.1.12 ffsubsync==0.5.0
+RUN pip install --no-cache-dir flask docker
 # dovi_tool（转换双层杜比视界用）：按机器架构取官方发行包，核对校验值后放进镜像。
 RUN set -eux; \
     case "$(uname -m)" in \

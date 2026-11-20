@@ -51,16 +51,6 @@ class RuleTests(unittest.TestCase):
     def request(self, data):
         return patch.object(app, "request", types.SimpleNamespace(get_json=lambda **kw: data))
 
-    # ---- 实测支持表 ----
-    def test_which_audio_the_tv_plays_directly(self):
-        for codec in ("eac3", "ac3", "aac", "pcm_s24le"):
-            self.assertTrue(app.audio_tv_direct(codec, "mkv"), codec)
-        for codec in ("dts", "truehd", "flac", "mlp", "opus"):
-            self.assertFalse(app.audio_tv_direct(codec, "mkv"), codec)
-        self.assertFalse(app.audio_tv_direct("pcm_s24le", "mp4"))       # LPCM 只验证过 MKV
-        self.assertEqual(app.target_container("iso", probe("hevc")), "mkv")
-        self.assertEqual(app.target_container("file", probe("hevc", dv=8)), "mp4")
-        self.assertFalse(app.OCR_SUBS)
 
     # ---- 自动预选 ----
     def test_default_pick_is_best_original_language_track_and_chinese_subtitle(self):
@@ -1855,6 +1845,14 @@ class RuleTests(unittest.TestCase):
         self.assertNotIn("不转会怎样", app.PAGE)
         for gone in ('id="go"', 'id="selectAll"', 'class="action-dock"', "<table>", "formatFlow(it.format_preview)"):
             self.assertNotIn(gone, app.PAGE)
+
+    # ---- 实测支持表 ----
+    def test_which_audio_the_tv_plays_directly(self):
+        for codec in ("eac3", "ac3", "aac", "pcm_s24le"):
+            self.assertTrue(app.audio_tv_direct(codec, "mkv"), codec)
+        for codec in ("dts", "truehd", "flac", "mlp", "opus"):
+            self.assertFalse(app.audio_tv_direct(codec, "mkv"), codec)
+        self.assertFalse(app.audio_tv_direct("pcm_s24le", "mp4"))       # LPCM 只验证过 MKV
 
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "需要 ffmpeg/ffprobe")

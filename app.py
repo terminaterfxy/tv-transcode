@@ -149,24 +149,14 @@ JELLYFIN_SUBTITLE_ROOTS = (
 VIDEO_EXT = {".mkv", ".mp4", ".m2ts", ".mts", ".m2t", ".ts", ".mov", ".avi"}
 DISC_IMAGE_EXT = {".iso", ".img"}
 DISC_KINDS = {"bdmv", "iso"}
-# ---- 电视实测支持表（LG G5 + Jellyfin 10.11.11 + Jellyfin for WebOS 1.2.2，2026-11-16/17）----
-# 以 Jellyfin 服务器日志为准。规则只依据这张表：
-#   直接播放：EAC3、LPCM；内嵌文本字幕；HDR10(MKV/MP4)；杜比视界 MP4；4K 高码率 MKV。
-#   电视解不了（服务器现转成 AAC 640k）：DTS、DTS-HD MA、TrueHD、FLAC。
-#   杜比视界放 MKV 不稳定，成品必须用 MP4。
-#   图形字幕 PGS：电视端“实验性 PGS 字幕渲染”开启时由电视自己画，不转码；
-#     MKV 里内嵌、MP4 旁边放同名外挂 .sup 都实测可用，因此不再需要 OCR。
-TV_DIRECT_AUDIO = {"aac", "ac3", "eac3", "mp3"}       # AC3/AAC/MP3 未单独实测，按常识视为可直放
 MP4_ORIGINAL_AUDIO = {"truehd", "dts", "flac"}   # 能原样放进 MP4 的“电视解不了”的音轨
 PGS_CODEC = "hdmv_pgs_subtitle"
 GRAPHIC_SUB_CODECS = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"}
 AUDIO_TRANSCODE = {"truehd", "dts", "mlp", "flac"}     # 旧名保留：电视解不了、需要 EAC3 兼容轨的常见编码
 MP4_AUDIO_COPY = {"aac", "ac3", "eac3", "mp3"}      # LG/webOS 可在 MP4 中稳妥直放
-SUB_STRIP = {"hdmv_pgs_subtitle", "dvd_subtitle"}    # 需剥离的图形字幕
 # 成品是 MKV 时，转 EAC3 的同时把原始 TrueHD/DTS 音轨也留下：EAC3 排在前面作为
 # 电视一定能播的兼容轨，原轨给能解码的电视/功放用，音质不再有损失。
 KEEP_ORIGINAL_AUDIO = True
-ORIGINAL_AUDIO_KEEP_CODECS = {"truehd", "dts", "mlp", "flac"}   # 仅为兼容旧引用，规则见 kept_original_tracks
 # MP4 成品（杜比视界、原盘 H.264/HEVC）也保留原轨。2026-11-16 在 LG G5 +
 # Jellyfin 10.11.11 上用合成样片实测：杜比视界 MP4 里多一条 TrueHD 或 DTS，
 # 默认播放（画面、杜比视界标志、EAC3 兼容轨）不受影响，手动选原轨也能出声。
@@ -504,10 +494,6 @@ def output_container(dv_profile, dv_container=None, p7_mode=None):
 
 SCAN_INTERVAL = 8                                    # 秒
 
-# ---- 字幕 OCR:把源里所有 PGS 图形字幕 OCR 成文本 SRT 内嵌(不判断语言,全转) ----
-# PGS 图形字幕在 webOS 上会逼服务器烧录转码→卡;转成文本既不卡,又和片源天生同步
-# (不像 Jellyfin 下载的字幕会因版本/帧率不同而恒定错位+越往后越飘)。
-OCR_SUBS = False                                     # 2026-11-17 起默认关闭：电视能直接显示图形字幕，OCR 代码保留备用
 
 # ---- 空间管理(基于真实余量调校) ----
 # 媒体盘往往不止存电影，余量偏紧，所以预检从严。
@@ -722,20 +708,9 @@ def recover_interrupted_upgrade(startup=True):
 # 仓库里的 Dockerfile 必须与这里逐字一致（有测试把关），手工 docker build 用那一份。
 EMBEDDED_DOCKERFILE = r'''FROM python:3.11-slim
 RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-      ffmpeg mkvtoolnix \
-      tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-chi-tra tesseract-ocr-eng \
-      tesseract-ocr-jpn tesseract-ocr-kor \
-      libgl1 libglib2.0-0 \
+ && apt-get install -y --no-install-recommends ffmpeg mkvtoolnix \
  && rm -rf /var/lib/apt/lists/*
-# pgsrip 把 ISO 639-3 中文码 zho 直接交给 Tesseract；Debian 的模型文件却叫
-# chi_sim.traineddata。补一个同目录别名，否则“中文包明明安装了”仍会 OCR 失败。
-RUN set -eux; \
-    chi_sim="$(find /usr/share/tesseract-ocr -name chi_sim.traineddata -print -quit)"; \
-    test -n "$chi_sim"; \
-    ln -sf "$(basename "$chi_sim")" "$(dirname "$chi_sim")/zho.traineddata"
-RUN pip install --no-cache-dir \
-      flask docker pgsrip==0.1.12 ffsubsync==0.5.0
+RUN pip install --no-cache-dir flask docker
 # dovi_tool（转换双层杜比视界用）：按机器架构取官方发行包，核对校验值后放进镜像。
 RUN set -eux; \
     case "$(uname -m)" in \
@@ -1324,11 +1299,6 @@ def audio_tv_direct(codec, container="mkv", profile=""):
     return audio_action(codec, container, profile) == "keep"
 
 
-def audio_needs_transcode(codec, for_mp4=False):
-    """这条音轨是否需要一条 EAC3 兼容轨（电视解不了它）。"""
-    return not audio_tv_direct(codec, "mp4" if for_mp4 else "mkv")
-
-
 def kept_original_tracks(probe, container, indices=None):
     """返回会在成品里同时保留原轨的源音轨序号（只看 indices 指定的音轨）。"""
     if not probe or container not in ("mkv", "mp4"):
@@ -1431,15 +1401,6 @@ def summarize_probe(data):
     return s
 
 
-VIDEO_LABELS = {
-    "h264": "H.264",
-    "hevc": "HEVC",
-    "vc1": "VC-1",
-    "vc1image": "VC-1",
-    "mpeg2video": "MPEG-2",
-    "mpeg4": "MPEG-4",
-    "av1": "AV1",
-}
 AUDIO_LABELS = {
     "truehd": "TrueHD",
     "dts": "DTS",
@@ -1952,15 +1913,6 @@ def conversion_card(kind, probe, payload="", size=0, selection=None):
     return card
 
 
-def target_container(kind, probe):
-    """成品容器：只有杜比视界用 MP4（MKV 里实测会丢杜比），其余一律 MKV。
-
-    HDR10 和普通画质放 MKV 实测都是直接播放，而且 MKV 能内嵌图形字幕和 LPCM。
-    """
-    video = (probe or {}).get("video") or {}
-    return output_container(int(video.get("dv_profile") or 0))
-
-
 def format_preview(kind, probe, payload="", preview_status=None, preview_error=None,
                    as_is=False, selection=None):
     """返回页面上的“当前画面 → G5 播放结果”说明。"""
@@ -2075,13 +2027,10 @@ def format_preview(kind, probe, payload="", preview_status=None, preview_error=N
     target_bits.extend(audio_plan_labels(plan, probe) or ["所选音轨保留原编码"])
     if "p7" in plan["must"]:
         target_bits.append("保留基础层和动态元数据，移除增强层")
-    if pgs_count and OCR_SUBS:
-        target_bits.append(OCR_PLANNED_DETAIL)
-    else:
-        for mode, label in (("embed", "内嵌"), ("sidecar", "外挂")):
-            count = sum(track["how"] == mode for track in plan["subs"])
-            if count:
-                target_bits.append(f"{label}字幕 {count} 条")
+    for mode, label in (("embed", "内嵌"), ("sidecar", "外挂")):
+        count = sum(track["how"] == mode for track in plan["subs"])
+        if count:
+            target_bits.append(f"{label}字幕 {count} 条")
         if not plan["subs"]:
             target_bits.append("未选字幕")
     return {
@@ -3650,36 +3599,6 @@ def audio_sub_args(probe, selection=None):
     return args, audio_count, sub_count
 
 
-def pgs_track_count(probe):
-    """源里 PGS 图形字幕轨数量(要 OCR 的对象)"""
-    return sum(1 for s in probe["subs"] if s["codec"] == "hdmv_pgs_subtitle")
-
-
-def _pgs_tracks(payload: Path):
-    """用 mkvmerge -J 拿到 PGS 字幕轨的真实 track id 与语言(track id 与 ffprobe 的流序号未必一致,以此为准)"""
-    try:
-        out = subprocess.run(["mkvmerge", "-J", str(payload)],
-                             capture_output=True, timeout=120)
-        data = json.loads(out.stdout.decode("utf-8", "replace"))
-    except Exception:
-        return []
-    res = []
-    for t in data.get("tracks", []):
-        if t.get("type") != "subtitles":
-            continue
-        props = t.get("properties", {}) or {}
-        if props.get("codec_id") == "S_HDMV/PGS":
-            res.append({"id": t.get("id"),
-                        "lang": (props.get("language") or "und")})
-    return res
-
-
-LANG_ALIASES = {
-    "zho": "zho", "chi": "zho", "zh": "zho",
-    "eng": "eng", "en": "eng",
-    "jpn": "jpn", "ja": "jpn",
-    "kor": "kor", "ko": "kor",
-}
 SRT_TIMECODE_RE = re.compile(
     r"\d{1,2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*"
     r"\d{1,2}:\d{2}:\d{2}[,.]\d{3}"
@@ -3753,11 +3672,6 @@ def write_srt(path, cues):
 def subtitle_candidate_path(name):
     digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:24]
     return WORK / "subtitle_candidates" / f"{digest}.zho.srt"
-
-
-def subtitle_anchor_path(name):
-    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:24]
-    return WORK / "subtitle_anchors" / f"{digest}.jpn.srt"
 
 
 def subtitle_sidecar_path(output):
@@ -3897,58 +3811,6 @@ def shift_aligned_subtitle(path, delta_seconds, output):
         raise ValueError("手动偏移后有效字幕不足 5 条，请检查正负方向和秒数")
     write_srt(output, shifted)
     return output
-
-
-def load_subtitle_candidate(name):
-    path = subtitle_candidate_path(name)
-    if not path.is_file():
-        return None
-    try:
-        cues = parse_srt_text(path.read_text("utf-8-sig"))
-    except OSError:
-        return None
-    return (path, cues) if cues else None
-
-
-def persist_japanese_subtitle_anchor(name, ocr_srts):
-    """保留首次 OCR 得到的日文时间轴，之后换字幕无需再读原盘。"""
-    japanese = next((Path(path) for path, lang in ocr_srts if lang == "jpn"), None)
-    if not japanese or not _inspect_srt(japanese):
-        return None
-    target = subtitle_anchor_path(name)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(japanese, target)
-    return target
-
-
-def extract_japanese_anchor_from_output(output, target):
-    """兼容旧成品：从已内嵌的日文文本字幕提取时间轴作为校轴锚点。"""
-    data = ffprobe(output)
-    if not data:
-        return None
-    stream_index = None
-    for stream in data.get("streams", []):
-        if stream.get("codec_type") != "subtitle":
-            continue
-        tags = stream.get("tags", {}) or {}
-        lang = LANG_ALIASES.get(str(tags.get("language", "")).lower(), "und")
-        if lang == "jpn" and stream.get("codec_name") not in SUB_STRIP:
-            stream_index = stream.get("index")
-            break
-    if stream_index is None:
-        return None
-    target.parent.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
-        [
-            "ffmpeg", "-y", "-loglevel", "error", "-i", str(output),
-            "-map", f"0:{stream_index}", "-c:s", "srt", str(target),
-        ],
-        capture_output=True, timeout=300,
-    )
-    if result.returncode != 0 or not _inspect_srt(target):
-        target.unlink(missing_ok=True)
-        return None
-    return target
 
 
 def _docker_exec_bytes(result):
@@ -4176,237 +4038,6 @@ def transform_cues(cues, transform):
         for cue in cues
         if cue["end"] * scale + offset > 0
     ]
-
-
-def uncovered_anchor_cues(anchor_cues, aligned_cues):
-    """找出成品中文字幕未覆盖的盘内日文对白，供 AI 只补这些缺口。"""
-    starts = [cue["start"] for cue in aligned_cues]
-    missing = []
-    for anchor in anchor_cues:
-        pos = bisect_left(starts, anchor["start"])
-        nearby = aligned_cues[max(0, pos - 2):pos + 3]
-        covered = any(
-            min(anchor["end"], cue["end"]) - max(anchor["start"], cue["start"]) >= -900
-            for cue in nearby
-        )
-        if not covered:
-            missing.append(anchor)
-    return missing
-
-
-def subtitle_ai_config():
-    """读取 OpenAI-compatible 字幕补译配置；没有配置时绝不发出网络请求。"""
-    try:
-        saved = json.loads((WORK / ".subtitle_ai.json").read_text("utf-8"))
-    except (OSError, ValueError):
-        saved = {}
-    endpoint = os.environ.get("SUBTITLE_AI_ENDPOINT", "").strip()
-    api_key = os.environ.get("SUBTITLE_AI_API_KEY", "").strip()
-    model = os.environ.get("SUBTITLE_AI_MODEL", "").strip()
-    endpoint = str(saved.get("endpoint") or endpoint).strip()
-    api_key = str(saved.get("api_key") or api_key).strip()
-    model = str(saved.get("model") or model).strip()
-    if not endpoint or not api_key or not model:
-        return None
-    return {"endpoint": endpoint, "api_key": api_key, "model": model}
-
-
-def save_subtitle_ai_config(endpoint, model, api_key):
-    parsed = urlparse.urlparse(endpoint)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise ValueError("接口地址必须是完整的 http/https URL")
-    if not model.strip():
-        raise ValueError("必须填写模型名称")
-    previous = subtitle_ai_config() or {}
-    key = api_key.strip() or previous.get("api_key", "")
-    if not key:
-        raise ValueError("必须填写 API Key")
-    data = {"endpoint": endpoint.strip(), "model": model.strip(), "api_key": key}
-    path = WORK / ".subtitle_ai.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
-    return data
-
-
-def ai_translate_missing(cues, config):
-    """批量把 OCR 日文缺段翻成自然简中；返回 cue 副本，失败直接抛出。"""
-    translated = []
-    for batch_start in range(0, len(cues), 35):
-        batch = cues[batch_start:batch_start + 35]
-        lines = [{"id": idx, "text": cue["text"]} for idx, cue in enumerate(batch)]
-        prompt = (
-            "你是影视字幕译者。把下面 OCR 得到的日文对白翻译为自然、简洁的简体中文。"
-            "修正常见 OCR 小错误；不要解释，不要添加原文中没有的信息。"
-            "严格输出 JSON 数组，每项仅包含 id 和 text，id 必须与输入一致。\n"
-            + json.dumps(lines, ensure_ascii=False)
-        )
-        payload = json.dumps({
-            "model": config["model"],
-            "messages": [
-                {"role": "system", "content": "你只输出可解析的 JSON。"},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.2,
-        }, ensure_ascii=False).encode("utf-8")
-        req = urlrequest.Request(
-            config["endpoint"],
-            data=payload,
-            headers={
-                "Authorization": f"Bearer {config['api_key']}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        try:
-            with urlrequest.urlopen(req, timeout=90) as response:
-                result = json.loads(response.read().decode("utf-8"))
-            content = result["choices"][0]["message"]["content"].strip()
-            match = re.search(r"\[[\s\S]*\]", content)
-            items = json.loads(match.group(0) if match else content)
-        except (OSError, ValueError, KeyError, IndexError, urlerror.URLError) as exc:
-            raise RuntimeError(f"AI 补译请求失败: {exc}") from exc
-        mapped = {
-            int(item["id"]): str(item["text"]).strip()
-            for item in items
-            if isinstance(item, dict) and str(item.get("id", "")).isdigit()
-        }
-        for idx, cue in enumerate(batch):
-            text = mapped.get(idx)
-            if text:
-                translated.append({**cue, "text": text, "origin": "ai"})
-    return translated
-
-
-def align_chinese_subtitle(job, anchor_cues, candidate_cues, output):
-    """按日文 OCR 时间分布校准人工中文字幕，并可选补译缺段。"""
-    transform = estimate_subtitle_transform(anchor_cues, candidate_cues)
-    if not transform:
-        add_warning(job, "成品中文字幕与盘内日文时间分布匹配度过低，未自动改写时间轴")
-        return None
-    aligned = transform_cues(candidate_cues, transform)
-    missing = uncovered_anchor_cues(anchor_cues, aligned)
-    log(job, "中文字幕校轴: "
-        f"偏移 {transform['offset_ms']/1000:+.3f} 秒，"
-        f"速率 {transform['scale']:.6f}，匹配度 {transform['confidence']:.0%}")
-    additions = []
-    if missing:
-        config = subtitle_ai_config()
-        if config:
-            try:
-                additions = ai_translate_missing(missing, config)
-                log(job, f"AI补译: 已补 {len(additions)}/{len(missing)} 个缺失字幕段")
-            except RuntimeError as exc:
-                add_warning(job, str(exc))
-        else:
-            add_warning(
-                job,
-                f"成品中文字幕已按原盘校轴，但仍有 {len(missing)} 个盘内日文段落未覆盖；"
-                "未配置字幕 AI，暂未机翻这些缺口",
-            )
-    write_srt(output, aligned + additions)
-    stats = _inspect_srt(output)
-    if not stats:
-        return None
-    log(job, f"中文字幕校轴完成: {stats['cue_count']} 个字幕段，人工译文优先")
-    return output
-
-
-def _run_ffsubsync(arguments):
-    """延迟载入 ffsubsync，避免服务启动时因可选依赖异常导致整个面板不可用。"""
-    try:
-        from ffsubsync.ffsubsync import make_parser, run
-    except ImportError as exc:
-        raise RuntimeError("镜像中缺少 ffsubsync，请使用新版 Dockerfile 升级服务") from exc
-    parser = make_parser()
-    return run(parser.parse_args(arguments))
-
-
-def align_chinese_subtitle_by_audio(job, video, candidate_cues, output):
-    """没有 OCR 锚点时，用成品音频的对白活动安全校准外部中文字幕。
-
-    只写入施工区的临时 SRT，不修改视频。允许最多 20 分钟的前贴片偏移，并让
-    ffsubsync 在低质量结果时保持失败；调用方必须再让用户确认检测到的偏移量。
-    """
-    video = Path(video)
-    output = Path(output)
-    input_srt = output.with_name("candidate.input.zho.srt")
-    write_srt(input_srt, candidate_cues)
-    arguments = [
-        str(video), "-i", str(input_srt), "-o", str(output),
-        "--max-offset-seconds", "1200",
-        "--quality-max-offset-seconds", "1200",
-        "--skip-sync-on-low-quality",
-        "--multi-segment-sync",
-        "--skip-intro-outro",
-        "--parallel-workers", "2",
-        "--output-encoding", "utf-8",
-    ]
-    try:
-        result = _run_ffsubsync(arguments)
-    except Exception as exc:
-        output.unlink(missing_ok=True)
-        raise RuntimeError(f"音频自动校轴运行失败: {exc}") from exc
-    finally:
-        input_srt.unlink(missing_ok=True)
-
-    offset = result.get("offset_seconds")
-    scale = result.get("framerate_scale_factor")
-    if (not result.get("sync_was_successful") or offset is None or scale is None
-            or not _inspect_srt(output)):
-        output.unlink(missing_ok=True)
-        raise ValueError(
-            "成品没有日文 OCR 时间轴，音频自动校轴的可信度也不足。"
-            "未改动现有视频和字幕；请换一份更匹配的字幕重试"
-        )
-    if abs(float(offset)) > 1200 or abs(float(scale) - 1.0) > 0.05:
-        output.unlink(missing_ok=True)
-        raise ValueError("音频校轴检测结果超出安全范围，未改动现有字幕")
-
-    aligned_cues = parse_srt_text(output.read_text("utf-8-sig"))
-    media = summarize_probe(ffprobe(video))
-    duration_ms = float(media.get("duration") or 0) * 1000 if media else 0
-    if duration_ms:
-        inside = sum(
-            1 for cue in aligned_cues
-            if cue["end"] > 0 and cue["start"] < duration_ms + 120_000
-        )
-        if inside < max(5, int(len(aligned_cues) * 0.9)):
-            output.unlink(missing_ok=True)
-            raise ValueError(
-                "音频校轴后的大部分字幕落在影片时长之外，疑似选错发行版，未应用"
-            )
-    log(job, "中文字幕音频校轴: "
-        f"偏移 {float(offset):+.3f} 秒，速率 {float(scale):.6f}，"
-        f"{len(aligned_cues)} 个字幕段")
-    return output, {
-        "method": "audio",
-        "offset_seconds": float(offset),
-        "scale": float(scale),
-        "cue_count": len(aligned_cues),
-    }
-
-
-def build_hybrid_chinese_subtitle(job, item_name, ocr_srts, jobdir):
-    """人工成品中文优先校轴；只对未覆盖的盘内日文 cue 做可选 AI 补译。"""
-    candidate = load_subtitle_candidate(item_name)
-    if not candidate:
-        return None
-    if any(lang == "zho" for _path, lang in ocr_srts):
-        log(job, "中文字幕校轴: 盘内已有中文 OCR 字幕，优先使用原盘中文字幕")
-        return None
-    japanese = next((path for path, lang in ocr_srts if lang == "jpn"), None)
-    if not japanese:
-        add_warning(job, "已提供成品中文字幕，但盘内日文 OCR 未成功，无法可靠自动校轴")
-        return None
-    anchor_cues = parse_srt_text(Path(japanese).read_text("utf-8-sig"))
-    _candidate_path, candidate_cues = candidate
-    return align_chinese_subtitle(
-        job, anchor_cues, candidate_cues, jobdir / "hybrid.zho.srt"
-    )
 
 
 def tracked_movie_output(name):
@@ -4688,426 +4319,6 @@ def _inspect_srt(path: Path):
     if cue_count < 1 or meaningful < 1:
         return None
     return {"text": body, "cue_count": cue_count, "meaningful": meaningful}
-
-
-def _classify_srt(path: Path, fallback_lang):
-    """校验 OCR SRT 并按内容定语言；稀疏字幕优先参考盘内语言标签。"""
-    inspected = _inspect_srt(path)
-    if not inspected:
-        return None
-    txt = inspected["text"]
-    cjk = sum(1 for ch in txt if "\u4e00" <= ch <= "\u9fff")
-    kana = sum(1 for ch in txt if "\u3040" <= ch <= "\u30ff")
-    hangul = sum(1 for ch in txt if "\uac00" <= ch <= "\ud7a3")
-    latin = sum(1 for ch in txt if ch.isascii() and ch.isalpha())
-    fallback = LANG_ALIASES.get((fallback_lang or "").lower(), "und")
-    if kana:
-        return "jpn"
-    if hangul:
-        return "kor"
-    if cjk:
-        return fallback if fallback in ("zho", "jpn", "kor") else "zho"
-    if latin:
-        return fallback
-    return fallback
-
-
-def _run_pgsrip_progress(job, target: Path, base_pct, span_pct):
-    """跑 pgsrip 并把它 tqdm 的百分比实时映射到 [base_pct, base_pct+span_pct]。
-    pgsrip 进度用 \\r 刷同一行(不是换行),故逐字节读、遇 \\r 或 \\n 才解析,才抓得到百分比。
-    返回 (退出码, 诊断输出尾部)，失败时不再把真正原因吞掉。"""
-    with subprocess.Popen(
-        ["pgsrip", "--debug", str(target)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    ) as p:
-        buf = bytearray()
-        output_lines = []
-        while True:
-            ch = p.stdout.read(1)
-            if not ch:
-                break
-            if ch in (b"\r", b"\n"):
-                line = buf.decode("utf-8", "replace").strip()
-                if line:
-                    output_lines.append(line)
-                    if len(output_lines) > 80:
-                        output_lines = output_lines[-80:]
-                m = re.search(r"(\d+)%", line)
-                if m:
-                    within = min(100, int(m.group(1)))
-                    job["percent"] = min(99, base_pct + span_pct * within / 100.0)
-                buf.clear()
-            else:
-                buf += ch
-        if buf:
-            output_lines.append(buf.decode("utf-8", "replace").strip())
-        p.wait()
-        tail = "\n".join(line for line in output_lines if line)[-2400:]
-        return p.returncode, tail
-
-
-PGSRIP_CODE_FALLBACK = {
-    "zho": "zh", "chi": "zh", "cmn": "zh", "jpn": "ja", "kor": "ko", "eng": "en",
-    "fra": "fr", "fre": "fr", "deu": "de", "ger": "de", "spa": "es", "por": "pt",
-    "ita": "it", "rus": "ru", "nld": "nl", "dut": "nl", "tha": "th", "vie": "vi",
-}
-
-
-def pgsrip_language_code(tag):
-    """返回 pgsrip 能原样读回的文件名语言码。
-
-    pgsrip 从 `名字.语言.sup` 里解析语言，再用解析结果重新拼出路径去读文件；
-    它拼的是两字母码。文件若叫 `x.eng.sup`，它会去打开 `x.en.sup`，找不到文件，
-    结果就是“未产出 SRT”。所以 SUP 必须直接用它会拼出来的那个写法命名。
-    """
-    tag = (tag or "und").lower()
-    try:
-        import cleanit  # noqa: F401  注册 pgsrip 使用的语言转换器
-        from babelfish import Language
-        return str(Language.fromcleanit(tag))
-    except Exception:
-        return PGSRIP_CODE_FALLBACK.get(tag, tag if len(tag) == 2 else "und")
-
-
-TESSERACT_CODE_FALLBACK = {
-    "chi": "zho", "cmn": "zho", "zh": "zho", "fre": "fra", "ger": "deu", "dut": "nld",
-    "en": "eng", "ja": "jpn", "ko": "kor",
-}
-
-
-def tesseract_language_code(tag):
-    """pgsrip 会向 Tesseract 请求的模型名（ISO 639-3）。"""
-    tag = (tag or "und").lower()
-    try:
-        import cleanit  # noqa: F401
-        from babelfish import Language
-        return Language.fromcleanit(tag).alpha3
-    except Exception:
-        return TESSERACT_CODE_FALLBACK.get(tag, tag)
-
-
-def installed_tesseract_languages():
-    """镜像里已安装的识别模型；查询失败返回 None（此时不做预先跳过）。"""
-    try:
-        listed = subprocess.run(["tesseract", "--list-langs"],
-                                capture_output=True, timeout=30)
-    except Exception:
-        return None
-    if listed.returncode != 0:
-        return None
-    text = listed.stdout.decode("utf-8", "replace") + listed.stderr.decode("utf-8", "replace")
-    names = {line.strip() for line in text.splitlines()[1:] if line.strip()}
-    return names or None
-
-
-def ocr_failure_reason(diagnostic):
-    """从 pgsrip 的调试输出里取出真正的异常那一行。
-
-    异常信息在回溯的最后；日志每行只留前 400 字，直接贴尾部 600 字会正好把
-    最后这行截掉（日语轨失败时就只看到半截回溯）。
-    """
-    lines = [line.strip() for line in str(diagnostic or "").splitlines() if line.strip()]
-    for line in reversed(lines):
-        if re.match(r"^[\w.]*(Error|Exception)\b", line) or "Error while trying to rip" in line:
-            return line[:300]
-    return lines[-1][:300] if lines else ""
-
-
-PGS_CHUNK_SUBTITLES = 200   # 分段识别时每段包含的字幕条数
-
-
-def split_sup(sup: Path, per_chunk=PGS_CHUNK_SUBTITLES):
-    """把一条 PGS（.sup）按字幕条数切成若干小文件，返回它们的路径。
-
-    pgsrip 会把整条轨的所有字幕拼成一张大图交给 Tesseract。日语这类大字符集模型
-    处理这样一张图时内存占用很高，NAS 上实测进程被系统直接杀掉（退出码 -9）。
-    切小以后每次只识别一段，内存有上限。
-
-    只在“Epoch Start”处下刀：那是一条新字幕的起点，之前的画面对象不再被引用，
-    所以每一段都能独立解码。PGS 的时间戳是绝对时间，各段识别结果直接合并即可。
-    切不出两段以上（文件损坏或本来就很短）时返回空列表。
-    """
-    data = sup.read_bytes()
-    starts = []          # 每个 Epoch Start 所在显示集的起始偏移
-    pos = 0
-    while pos + 13 <= len(data):
-        if data[pos:pos + 2] != b"PG":
-            return []    # 结构不对，不冒险切
-        segment_type = data[pos + 10]
-        size = int.from_bytes(data[pos + 11:pos + 13], "big")
-        payload = pos + 13
-        if segment_type == 0x16 and size >= 8 and data[payload + 7] == 0x80:
-            starts.append(pos)
-        pos = payload + size
-    if pos != len(data) or len(starts) <= per_chunk:
-        return []
-    cuts = starts[::per_chunk]
-    cuts[0] = 0
-    cuts.append(len(data))
-    stem, language = sup.name[:-len(".sup")].rsplit(".", 1)
-    parts = []
-    for index in range(len(cuts) - 1):
-        part = sup.with_name(f"{stem}_part{index:03d}.{language}.sup")
-        part.write_bytes(data[cuts[index]:cuts[index + 1]])
-        parts.append(part)
-    return parts
-
-
-def ocr_sup_in_chunks(job, sup: Path, base_pct, span_pct, why=""):
-    """整条识别失败后的退路：分段识别再合并。返回合并后的 SRT 路径，失败返回 None。"""
-    parts = split_sup(sup)
-    if not parts:
-        return None
-    log(job, "OCR字幕: 整条识别失败" + (f"（{why}）" if why else "")
-             + f"，改为分 {len(parts)} 段识别…")
-    cues = []
-    failed_parts = 0
-    last_diagnostic = ""
-    try:
-        for index, part in enumerate(parts):
-            step = span_pct / len(parts)
-            _rc, diagnostic = _run_pgsrip_progress(job, part, base_pct + index * step, step)
-            srt = part.with_suffix(".srt")
-            if srt.is_file():
-                cues.extend(parse_srt_text(srt.read_text("utf-8-sig", "ignore")))
-                srt.unlink(missing_ok=True)
-            else:
-                failed_parts += 1
-                last_diagnostic = diagnostic
-    finally:
-        for part in parts:
-            part.unlink(missing_ok=True)
-            part.with_suffix(".srt").unlink(missing_ok=True)
-    if failed_parts:
-        print(f"OCR字幕诊断(分段识别 {sup.name}):\n{last_diagnostic}", flush=True)
-        log(job, f"OCR字幕: 分段识别时 {failed_parts}/{len(parts)} 段失败: "
-                 f"{ocr_failure_reason(last_diagnostic)}")
-    # 丢段意味着整段时间没有字幕，宁可判失败也不交付残缺的字幕轨
-    if failed_parts or not cues:
-        return None
-    merged = sup.with_suffix(".srt")
-    write_srt(merged, cues)
-    return merged
-
-
-def pgs_extract_timeout(source):
-    """按文件大小给一次性抽取留足时间：按最慢约 15MB/s 估算，至少 30 分钟。"""
-    try:
-        size = Path(source).stat().st_size
-    except OSError:
-        size = 0
-    return max(1800, int(size / (15 * 1024**2)))
-
-
-def ocr_subs(job, payload: Path, jobdir: Path):
-    """把源里所有 PGS 图形字幕逐条 OCR 成文本 SRT(不判断语言,全转)。
-    逐条处理(而非一次性整片跑)是为了能显示"第几条/共几条 + 条内百分比"的实时进度,
-    否则 pgsrip 闷头跑十几分钟看不出动静,分不清是在干活还是卡死了。
-    先由本程序用真实轨道 ID 抽成 SUP，再把 SUP 交给 pgsrip。pgsrip 官方支持
-    SUP 输入；这样避免它对临时 MKV 再次调用 mkvextract，也能保留完整错误信息。
-    返回 [(srt路径, 语言)] 列表。全程 best-effort: 任何失败只记日志、跳过,绝不拖垮整个任务。"""
-    # 注意：2026-11-17 起主流程不再调用本函数（电视能直接显示图形字幕）。
-    # 代码保留，供以后需要把图形字幕转成文本时使用。
-    extract_source = payload
-    if payload.suffix.lower() != ".mkv":
-        extract_source = jobdir / "pgs_source.mkv"
-        log(job, f"OCR字幕: {payload.suffix.upper() or '非MKV'} 源先无损规范化为临时 MKV")
-        try:
-            normalized = subprocess.run(
-                ["mkvmerge", "-o", str(extract_source), str(payload)],
-                capture_output=True, timeout=1800,
-            )
-            normalized_detail = (
-                normalized.stdout.decode("utf-8", "replace") + "\n"
-                + normalized.stderr.decode("utf-8", "replace")
-            ).strip()
-            if (normalized.returncode >= 2 or not extract_source.is_file()
-                    or extract_source.stat().st_size == 0):
-                detail = normalized_detail[-700:]
-                add_warning(
-                    job,
-                    "图形字幕规范化失败，成品将不含这些盘内字幕"
-                    + (f": {detail}" if detail else ""),
-                )
-                return []
-        except Exception as exc:
-            add_warning(job, f"图形字幕规范化异常，成品将不含这些盘内字幕: {exc}")
-            return []
-    pgs = _pgs_tracks(extract_source)
-    if not pgs:
-        add_warning(job, "ffprobe 检测到 PGS，但 mkvmerge 无法读取字幕轨，成品将不含这些图形字幕")
-        return []
-    set_phase(job, "OCR字幕", 0)
-    n = len(pgs)
-    results = []   # (Path, lang)
-    failures = []
-
-    # 一次 mkvextract 抽出全部 PGS 轨。逐条抽取时每条都要把几十 GB 的正片从头读
-    # 一遍，轨道多的 UHD 盘会读上十几遍，并且很容易撞上单条超时而整批丢字幕。
-    tracks = []
-    for idx, t in enumerate(pgs):
-        tag = (t["lang"] or "und").lower()
-        # 没标语言(und等)的强制按中文识别(覆盖'源没标语言的中文字幕');有标签的用其标签选模型
-        forced = "zho" if tag in ("und", "mis", "zxx", "") else tag
-        tracks.append((idx, t, forced,
-                       jobdir / f"pgs_{t['id']}.{pgsrip_language_code(forced)}.sup"))
-    extract_detail = ""
-    extract_code = 0
-    failed_languages = []
-    available = installed_tesseract_languages()
-    skipped = set()
-    if available is not None:
-        for idx, _t, forced, _sup in tracks:
-            model = tesseract_language_code(forced)
-            if model not in available:
-                skipped.add(idx)
-                failed_languages.append(forced)
-                reason = f"第{idx+1}条（{forced}）镜像未安装 {model} 识别模型，已跳过"
-                failures.append(reason)
-                log(job, "OCR字幕: " + reason)
-    wanted = [entry for entry in tracks if entry[0] not in skipped]
-    try:
-        if not wanted:
-            raise LookupError("没有可识别语言的 PGS 轨")
-        log(job, f"OCR字幕: 一次读取正片，抽出 {len(wanted)} 条 PGS…")
-        extract = subprocess.run(
-            ["mkvextract", str(extract_source), "tracks"]
-            + [f"{t['id']}:{sup}" for _idx, t, _forced, sup in wanted],
-            capture_output=True, timeout=pgs_extract_timeout(extract_source))
-        extract_code = extract.returncode
-        extract_detail = (
-            extract.stdout.decode("utf-8", "replace") + "\n"
-            + extract.stderr.decode("utf-8", "replace")
-        ).strip()
-        # mkvextract: 0=成功，1=有警告但完成，2=错误。只要 SUP 非空即可继续。
-        if extract_code == 1 and extract_detail:
-            log(job, f"OCR字幕抽取警告: {extract_detail[-500:]}")
-    except FileNotFoundError:
-        log(job, "OCR跳过: 容器内未安装 mkvextract(需重建镜像)")
-        add_warning(job, f"{n}条 PGS 均未成功转成文本（容器内未安装 mkvextract），这些图形字幕不在成品里")
-        return []
-    except LookupError:
-        pass
-    except subprocess.TimeoutExpired:
-        extract_code = 2
-        extract_detail = "mkvextract 读取正片超时"
-    except Exception as exc:
-        extract_code = 2
-        extract_detail = f"mkvextract 异常: {exc}"
-
-    for idx, t, forced, sup in wanted:
-        base = idx / n * 100.0
-        span = 1.0 / n * 100.0
-        try:
-            if extract_code >= 2 or not sup.is_file() or sup.stat().st_size == 0:
-                detail = extract_detail[-700:]
-                reason = f"第{idx+1}条 PGS 抽取失败"
-                if detail:
-                    reason += f": {detail}"
-                failures.append(reason)
-                failed_languages.append(forced)
-                log(job, "OCR字幕: " + reason)
-                continue
-            log(job, f"OCR字幕: 第{idx+1}/{n}条 (语言{forced}) 识别中…")
-            before = set(jobdir.glob("*.srt"))
-            rc, diagnostic = _run_pgsrip_progress(job, sup, base, span)
-            new_srts = [x for x in jobdir.glob("*.srt") if x not in before]
-            if not new_srts:
-                merged = ocr_sup_in_chunks(job, sup, base, span,
-                                           why=ocr_failure_reason(diagnostic))
-                if merged:
-                    new_srts = [merged]
-            if not new_srts:
-                # 完整诊断只进容器日志（docker logs），任务日志里留真正的异常行。
-                print(f"OCR字幕诊断(第{idx+1}条 {forced}):\n{diagnostic}", flush=True)
-                reason = f"第{idx+1}条（{forced}）pgsrip 未产出 SRT"
-                if rc:
-                    reason += f"（退出码 {rc}）"
-                cause = ocr_failure_reason(diagnostic)
-                if cause:
-                    reason += f": {cause}"
-                failures.append(reason)
-                failed_languages.append(forced)
-                log(job, "OCR字幕: " + reason)
-            for f in new_srts:
-                lang = _classify_srt(f, forced)
-                if lang:
-                    results.append((f, lang))
-                    stats = _inspect_srt(f)
-                    log(job, f"OCR字幕: 第{idx+1}/{n}条完成 → {lang}，"
-                             f"{stats['cue_count']} 个字幕段")
-                else:
-                    f.unlink(missing_ok=True)
-                    reason = f"第{idx+1}条 SRT 没有有效时间码或正文"
-                    failures.append(reason)
-                    failed_languages.append(forced)
-                    log(job, "OCR字幕: " + reason + "，已丢弃")
-        except FileNotFoundError:
-            log(job, "OCR跳过: 容器内未安装 pgsrip/tesseract(需重建镜像)")
-            failures.append("容器内未安装 pgsrip/tesseract")
-            for _idx, _t, _forced, leftover in tracks:
-                leftover.unlink(missing_ok=True)
-            return results
-        except Exception as e:
-            reason = f"第{idx+1}条处理异常: {e}"
-            failures.append(reason)
-            failed_languages.append(forced)
-            log(job, "OCR字幕: " + reason)
-        finally:
-            sup.unlink(missing_ok=True)
-        job["percent"] = min(99, (idx + 1) / n * 100.0)
-
-    job["percent"] = 100
-    if not results:
-        detail = failures[0] if failures else "未识别到有效文字"
-        log(job, "OCR未产出可用字幕；盘内时间轴不会被伪造，外部字幕需确认发行版")
-        add_warning(job, f"{n}条 PGS 均未成功转成文本（{detail[:160]}），"
-                         "这些图形字幕不在成品里；有前贴片/分支版时外部字幕可能整体错轴")
-    elif len(results) < n:
-        missing = "、".join(dict.fromkeys(failed_languages)) or "未知"
-        add_warning(job, f"{n}条 PGS 中仅 {len(results)} 条成功转成文本，其余未内嵌"
-                         f"（未成功的语言: {missing}）")
-    return results
-
-
-def mkvmerge_mux(job, phase, video_src: Path, aux: Path, out: Path,
-                 ocr_srts, default_duration_fps=None, video_only=False):
-    """统一的 mkvmerge 封装: 视频来自 video_src,音频/字幕/章节来自 aux,再追加 OCR 出的文本 SRT。
-    - default_duration_fps: P7路线的 BL 是无时间戳裸流,需指定帧率;从源直取视频轨时务必留空以免改时轴。
-    - video_only: 从源(整个mkv)里只取视频轨时置 True。
-    - ocr_srts: [(srt路径, 语言)] 列表。"""
-    set_phase(job, phase, 0)
-    cmd = ["mkvmerge", "--gui-mode", "-o", str(out)]
-    if default_duration_fps:
-        cmd += ["--default-duration", f"0:{default_duration_fps}fps"]
-    if video_only:
-        cmd += ["--no-audio", "--no-subtitles", "--no-chapters",
-                "--no-attachments", "--no-track-tags"]
-    cmd += [str(video_src), str(aux)]
-    for s, lang in ocr_srts:
-        is_cn = lang in ("zho", "chi", "zh")
-        if Path(s).name.startswith("hybrid."):
-            name = "中文(成品校轴)"
-        else:
-            name = ("中文" if is_cn else lang) + "(OCR)"
-        cmd += ["--language", f"0:{lang}", "--track-name", f"0:{name}",
-                "--default-track-flag", f"0:{'yes' if is_cn else 'no'}", str(s)]
-    def progress(line):
-        match = re.search(r'progress\s+(\d+)%', line)
-        if match:
-            job["percent"] = int(match.group(1))
-    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                          start_new_session=True) as process:
-        try:
-            detail = read_process_progress(job, process, progress)
-            if process.returncode not in (0, 1):
-                raise RuntimeError("mkvmerge 失败: " + detail)
-            if process.returncode == 1:
-                add_warning(job, "mkvmerge 完成但有警告: " + detail[-600:])
-        finally:
-            stop_local_process(process)
-    job["percent"] = 100
 
 
 def ffmpeg_mp4_mux(job, phase, source: Path, probe, out: Path, selection, dur,
@@ -5618,7 +4829,6 @@ def worker_loop():
                     "subtitle_sidecar": job.get("subtitle_sidecar"),
                     "source_snapshot": job.get("source_snapshot"),
                     "source_size": item.get("size"),
-                    "ocr": job.get("ocr"),
                     "plan": job.get("plan"),
                     "sidecars": job.get("sidecars") or [],
                     "verdict": job.get("verdict"),
@@ -5636,57 +4846,6 @@ def worker_loop():
             time.sleep(3)  # 让前端拉到最后一屏日志
             with LOCK:
                 CURRENT_JOB = None
-
-
-OCR_PLANNED_DETAIL = "PGS 按原时间轴 OCR 为文本"
-OCR_PLANNED_TAG_RE = re.compile(r"\d+条图形字幕OCR成文本")
-
-
-def recorded_ocr_outcome(processed):
-    """返回已完成任务实际的 (成功条数, 总条数)；没有 PGS 或无法判断时返回 None。
-
-    旧版本的完成记录没有 ocr 字段，从当时留下的持久警告里还原。
-    """
-    ocr = processed.get("ocr")
-    if isinstance(ocr, dict):
-        try:
-            return int(ocr["ok"]), int(ocr["total"])
-        except (KeyError, TypeError, ValueError):
-            return None
-    for warning in processed.get("warnings") or []:
-        failed = re.search(r"(\d+)条 PGS 均未成功转成文本", str(warning))
-        if failed:
-            return 0, int(failed.group(1))
-        partial = re.search(r"(\d+)条 PGS 中仅 (\d+) 条成功转成文本", str(warning))
-        if partial:
-            return int(partial.group(2)), int(partial.group(1))
-    return None
-
-
-def apply_ocr_outcome(preview, plan, outcome):
-    """把“预计 OCR”的说法换成实际结果；返回 (preview, plan) 的副本。"""
-    preview = dict(preview) if preview else preview
-    plan = list(plan or [])
-    if not outcome:
-        return preview, plan
-    ok, total = outcome
-    if ok >= total:
-        detail = f"{total} 条 PGS 已按原时间轴 OCR 为文本"
-        tag = f"{total}条图形字幕已OCR成文本"
-    elif ok <= 0:
-        detail = f"⚠ {total} 条 PGS 均未转成文本，这些图形字幕不在成品里"
-        tag = f"⚠ 图形字幕OCR失败 0/{total}"
-    else:
-        detail = f"⚠ PGS 仅 {ok}/{total} 条转成文本，其余未内嵌"
-        tag = f"⚠ 图形字幕OCR仅成功 {ok}/{total}"
-    if preview and preview.get("target_detail"):
-        preview["target_detail"] = preview["target_detail"].replace(
-            OCR_PLANNED_DETAIL, detail
-        )
-    replaced = [tag if OCR_PLANNED_TAG_RE.fullmatch(str(entry)) else entry for entry in plan]
-    if replaced == plan and ok < total and tag not in plan:
-        replaced.append(tag)   # 旧记录没存计划时，至少把字幕缺失标出来
-    return preview, replaced
 
 
 # ---------- API ----------
@@ -5788,10 +4947,7 @@ def api_state():
             if it["status"] == "done":
                 # 已完成条目不会再被探测；服务重启后内存里的计划是空的，
                 # 所以优先用完成时存下的计划，而不是让页面显示“等待探测”。
-                d["format_preview"], d["plan"] = apply_ocr_outcome(
-                    d["format_preview"], processed.get("plan") or d["plan"],
-                    recorded_ocr_outcome(processed),
-                )
+                d["plan"] = list(processed.get("plan") or d["plan"] or [])
             preview_allows_processing = (
                 it["kind"] not in DISC_KINDS
                 or it.get("preview_status") in {"ready", "failed"}
@@ -5865,7 +5021,6 @@ def api_state():
                     "low": free < (SAFETY_MARGIN + MIN_FREE_ABORT)}
         # 队列名单(排队中的条目名,按顺序)
         queue_names = list(JOB_QUEUE)
-        ai_config = subtitle_ai_config()
         return jsonify({
             "items": items,
             "job": job,
@@ -5880,11 +5035,6 @@ def api_state():
             "jellyfin_link": env_text("JELLYFIN_PUBLIC_URL"), "jellyfin_port": JELLYFIN_PORT,
             "folders": {"inbox": INBOX.name, "library": MOVIES.name, **{key + "_path": value for key, value in current_folders().items()}},
             "release": globals().get("APP_RELEASE", ""),
-            "subtitle_ai": {
-                "configured": bool(ai_config),
-                "endpoint": ai_config.get("endpoint", "") if ai_config else "",
-                "model": ai_config.get("model", "") if ai_config else "",
-            },
         })
 
 
@@ -6535,34 +5685,6 @@ def api_remove_subtitle_candidate():
         "ok": True,
         "removed": removed,
         "message": "已移除所选中文字幕；视频文件没有改动",
-    })
-
-
-@app.post("/api/subtitle_ai")
-@media_mutation
-def api_subtitle_ai():
-    """保存字幕缺段补译所用的 OpenAI-compatible 接口；永不向前端返回密钥。"""
-    remote = getattr(request, "remote_addr", "") or ""
-    try:
-        address = ipaddress.ip_address(remote)
-    except ValueError:
-        return jsonify({"error": "无法确认请求来自本机局域网"}), 403
-    if not (address.is_private or address.is_loopback):
-        return jsonify({"error": "字幕 AI 设置仅允许在局域网内修改"}), 403
-    data = request.get_json(silent=True) or {}
-    try:
-        saved = save_subtitle_ai_config(
-            str(data.get("endpoint", "")),
-            str(data.get("model", "")),
-            str(data.get("api_key", "")),
-        )
-    except (ValueError, OSError) as exc:
-        return jsonify({"error": str(exc)}), 400
-    return jsonify({
-        "ok": True,
-        "endpoint": saved["endpoint"],
-        "model": saved["model"],
-        "message": "字幕 AI 已配置；只会补译成品中文字幕没有覆盖的盘内日文段落",
     })
 
 
@@ -7307,7 +6429,6 @@ def api_subtitle_auto():
     return jsonify({"ok": True, "message": f"已下载：{result['name']}。电视上选中文字幕就能看。{tail}"})
 
 
-
 # ---------- 字幕弹窗：现有字幕、网上搜到的字幕，由用户自己选 ----------
 SUBTITLE_SETTLE_SECONDS = 20
 
@@ -7973,9 +7094,7 @@ button,input,select,textarea{font:inherit;letter-spacing:inherit;color:inherit}
 button{border:0;background:none;cursor:pointer}
 :focus-visible{outline:2px solid var(--btn);outline-offset:2px}
 [hidden]{display:none!important}
-.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .spacer{flex:1}
-.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 
 /* 页头：固定在顶部；右侧按钮宽度写死，文字变了位置也不变 */
 .topbar{position:sticky;top:0;z-index:30;background:var(--nav);border-bottom:1px solid var(--line);
@@ -8018,11 +7137,9 @@ select{-webkit-appearance:none;appearance:none;height:var(--h);padding:0 30px 0 
   color:var(--text);font-size:13px;cursor:pointer;text-overflow:ellipsis;min-width:0;
   background:var(--field) url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2212%22 height=%2212%22 viewBox=%220 0 12 12%22><path d=%22M2.5 4.5 6 8l3.5-3.5%22 fill=%22none%22 stroke=%22%2386868b%22 stroke-width=%221.5%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/></svg>') no-repeat right 10px center;
   transition:border-color .15s ease,box-shadow .15s ease}
-select:hover:not(:disabled){border-color:var(--faint)}select:disabled{opacity:.5;cursor:default}
-select:focus-visible,.subtitle-search:focus,.sync-input:focus,.rule-text:focus,.rule-note:focus{outline:none;border-color:var(--btn);
+select:hover:not(:disabled){border-color:var(--faint)}select:disabled{opacity:.5;cursor:default}select:focus-visible,.subtitle-search:focus,.sync-input:focus,.rule-note:focus{outline:none;border-color:var(--btn);
   box-shadow:0 0 0 3px color-mix(in srgb,var(--btn) 28%,transparent)}
-input[type=checkbox]{accent-color:var(--btn);width:15px;height:15px;margin:0}
-.subtitle-search,.sync-input,.rule-text{display:block;width:100%;height:38px;padding:0 12px;border:1px solid var(--line2);border-radius:10px;
+input[type=checkbox]{accent-color:var(--btn);width:15px;height:15px;margin:0}.subtitle-search,.sync-input{display:block;width:100%;height:38px;padding:0 12px;border:1px solid var(--line2);border-radius:10px;
   background:var(--field);color:var(--text);font-size:14px}
 .subtitle-search{margin-top:16px}
 
@@ -8065,7 +7182,6 @@ input[type=checkbox]{accent-color:var(--btn);width:15px;height:15px;margin:0}
 .mc-pick{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-top:18px;padding-top:18px;border-top:1px solid var(--line);
   font-size:13px;color:var(--muted)}
 .mc-pick select{max-width:280px}.mc-pick label{display:flex;align-items:center;gap:6px;cursor:pointer}
-.pick-hint{color:var(--faint);font-size:12px}
 .mc-note{margin-top:12px;font-size:14px;color:var(--muted)}
 .mc-done{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;flex-wrap:wrap}
 .mc-done-info{flex:1;min-width:260px}.mc-done-actions{display:flex;gap:10px;flex-wrap:wrap}
@@ -8099,12 +7215,6 @@ input[type=checkbox]{accent-color:var(--btn);width:15px;height:15px;margin:0}
 details{margin-top:12px}summary{cursor:pointer;color:var(--muted);font-size:12px;user-select:none}
 pre{margin:10px 0 0;padding:12px 14px;max-height:230px;overflow:auto;border-radius:12px;background:var(--tile);color:var(--muted);
   font:11px/1.65 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap}
-.format-flow{display:grid;grid-template-columns:minmax(0,1fr) 20px minmax(0,1fr);gap:6px;margin:12px 0 4px}
-.format-box{min-width:0;border-radius:10px;padding:9px 11px;background:var(--tile)}
-.format-label{display:block;margin-bottom:3px;color:var(--faint);font-size:11px}
-.format-box strong{display:block;font-size:12px;font-weight:600;overflow-wrap:anywhere}
-.format-box small{display:block;margin-top:3px;color:var(--muted);font-size:11px}
-.format-arrow{display:grid;place-items:center;color:var(--faint)}
 .tag{display:inline-flex;align-items:center;margin:1px 4px 1px 0;padding:2px 8px;border-radius:99px;font-size:11px;background:var(--ctl);color:var(--muted)}
 
 /* 设置页 */
@@ -8439,16 +7549,6 @@ function formatSeconds(sec){
   sec=Math.max(0,Math.floor(sec||0));const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;
   return h?h+'小时'+m+'分':(m?m+'分'+s+'秒':s+'秒');
 }
-function humanBytes(bytes){
-  let n=Number(bytes||0),units=['B','KB','MB','GB','TB'],i=0;
-  while(n>=1024&&i<units.length-1){n/=1024;i++}
-  return i===0?Math.round(n)+units[i]:n.toFixed(1)+units[i];
-}
-function signedOffset(seconds){
-  const value=Number(seconds||0),sign=value>=0?'延后 ':'提前 ',total=Math.abs(value);
-  const minutes=Math.floor(total/60),rest=(total-minutes*60).toFixed(3).replace(/\\.?0+$/,'');
-  return sign+(minutes?minutes+'分 ':'')+rest+'秒';
-}
 function subtitleClock(milliseconds){
   let value=Math.max(0,Math.round(Number(milliseconds)||0));
   const hours=Math.floor(value/3600000);value%=3600000;
@@ -8469,23 +7569,6 @@ function showToast(message,type=''){
   const el=$('#toast');el.textContent=message;el.className='toast show '+type;
   clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.className='toast',4200);
 }
-function kindTag(it){
-  if(it.kind==='bdmv')return tag('t-acc','BDMV 原盘');
-  if(it.kind==='iso')return tag('t-acc','光盘镜像');
-  if(it.kind==='multi_disc')return tag('t-err','多盘目录');
-  if(it.kind==='dir')return tag('t-dim','目录资源');
-  return tag('t-dim','媒体文件');
-}
-function statusTag(it){
-  if(it.status==='growing')return tag('t-warn','下载中');
-  if(it.status==='queued'){const pos=(state.queue||[]).indexOf(it.name);return tag('t-acc',pos>=0?'排队 #'+(pos+1):'排队中')}
-  if(it.status==='processing')return tag('t-acc','处理中');
-  if(it.status==='done')return tag('t-ok','已完成 '+(it.done_ts||''));
-  if(it.status==='error')return tag('t-err','处理失败');
-  if(it.status==='blocked')return tag('t-err','需要拆分');
-  if(['queued','analyzing'].includes(it.preview_status))return tag('t-acc','正在预读规格');
-  return it.clean?tag('t-ok','可直接入库'):tag('t-warn','等待处理');
-}
 function matches(it,filter){
   if(filter==='ready')return it.status==='ready'||it.status==='error';
   if(filter==='active')return ['growing','queued','processing'].includes(it.status);
@@ -8493,23 +7576,6 @@ function matches(it,filter){
   if(filter==='attention')return ['error','blocked'].includes(it.status)||(it.warnings||[]).length>0||
     (it.plan||[]).some(p=>p.includes('⚠'));
   return true;
-}
-function planTags(it){
-  return (it.plan||[]).map(p=>tag((p.includes('合规')||p.includes('原样入库'))?'t-ok':(p.includes('⚠')?'t-warn':'t-dim'),p)).join('')||
-    (it.status==='done'?tag('t-ok','已入库'):it.status==='blocked'?'':
-    tag('t-dim',it.status==='growing'?'等待下载完成':
-      (['queued','analyzing'].includes(it.preview_status)?'MakeMKV 只读预分析中':'等待探测')));
-}
-function formatFlow(preview){
-  if(!preview)return '';
-  const sourceLabel=preview.pre_read?'转换前预读':(preview.disc_pending?'原盘预读':'原盘画面');
-  const targetLabel=preview.pre_read||preview.disc_pending?'预计 LG G5 成品':'LG G5 播放结果';
-  return '<div class="format-flow'+(preview.provisional?' provisional':'')+'">'+
-    '<div class="format-box"><span class="format-label">'+sourceLabel+'</span><strong>'+esc(preview.source)+
-    '</strong><small>'+esc(preview.source_detail)+'</small></div>'+
-    '<div class="format-arrow" aria-hidden="true">→</div>'+
-    '<div class="format-box target"><span class="format-label">'+targetLabel+'</span><strong>'+esc(preview.target)+
-    '</strong><small>'+esc(preview.target_detail)+'</small></div></div>';
 }
 const PAGE_VERSION='__APP_VERSION__';
 const choice=Object.create(null);
@@ -9404,7 +8470,7 @@ tick();setInterval(tick,2500);
 </script></body></html>"""
 
 
-APP_RELEASE = "0.10.4"        # 给人看的版本号：改了功能就加；下面的指纹是这份文件内容算出来的，用来确认装上的就是这一份
+APP_RELEASE = "0.11.0"        # 给人看的版本号：改了功能就加；下面的指纹是这份文件内容算出来的，用来确认装上的就是这一份
 
 
 def _app_version():

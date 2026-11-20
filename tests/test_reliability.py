@@ -339,7 +339,7 @@ class ReliabilityTests(unittest.TestCase):
                 patch.object(app.threading, 'Thread', Thread):
             response, status = app.api_upgrade()
         self.assertEqual(status, 202, response)
-        self.assertIn(b'pgsrip==0.1.12', started[0][1])
+        self.assertIn(b'pip install --no-cache-dir flask docker', started[0][1])
         self.assertIn(b'COPY app.py /app/app.py', started[0][1])
 
     def test_upgrade_with_app_lacking_embedded_dockerfile_is_refused(self):
@@ -382,91 +382,6 @@ class ReliabilityTests(unittest.TestCase):
         _, _, result = self.run_fake_rip(log=log)
         self.assertIsInstance(result, RuntimeError)
 
-    # ---- P7：BL 裸流必须先重建时间戳 ----
-    @unittest.skipUnless(fixtures.shutil.which('ffmpeg') and fixtures.shutil.which('mkvmerge'),
-                         'requires ffmpeg and mkvmerge')
-    # ---- PGS 一次抽取全部轨道 ----
-    def test_all_pgs_tracks_are_extracted_in_one_pass(self):
-        source = self.inbox / 'movie.mkv'; source.write_bytes(b'x')
-        commands = []
-        def extract(command, **kwargs):
-            commands.append((command, kwargs.get('timeout')))
-            for spec in command[3:]:
-                track, target = spec.split(':', 1)
-                if track != '5':                      # 第 2 条抽不出来
-                    Path(target).write_bytes(b'PG')
-            return subprocess.CompletedProcess(command, 1, b'warning', b'')
-        def rip(_job, target, _base, _span):
-            target.with_suffix('.srt').write_text(
-                '1\n00:00:01,000 --> 00:00:02,000\nこんにちは\n', 'utf-8')
-            return 0, ''
-        tracks = [{'id': 3, 'lang': 'jpn'}, {'id': 5, 'lang': 'eng'}, {'id': 6, 'lang': 'und'}]
-        job = {'log': []}
-        with patch.object(app, '_pgs_tracks', return_value=tracks), \
-                patch.object(app.subprocess, 'run', side_effect=extract), \
-                patch.object(app, '_run_pgsrip_progress', side_effect=rip):
-            result = app.ocr_subs(job, source, self.work)
-        self.assertEqual(len(commands), 1)
-        command, timeout = commands[0]
-        self.assertEqual([spec.split(':', 1)[0] for spec in command[3:]], ['3', '5', '6'])
-        self.assertGreaterEqual(timeout, 1800)
-        self.assertEqual(len(result), 2)
-        self.assertIn('仅 2 条成功', job['warnings'][0])
-        self.assertEqual(list(self.work.glob('*.sup')), [])
-
-    def test_tracks_without_installed_model_are_skipped_and_named(self):
-        source = self.inbox / 'movie.mkv'; source.write_bytes(b'x')
-        commands = []
-        def extract(command, **_kwargs):
-            commands.append(command)
-            for spec in command[3:]:
-                Path(spec.split(':', 1)[1]).write_bytes(b'PG')
-            return subprocess.CompletedProcess(command, 0, b'', b'')
-        def rip(_job, target, _base, _span):
-            if '.ja.' in target.name:      # 日语：模型装了，但 Tesseract 中途报错
-                return 0, ('Traceback (most recent call last):\n  File "x.py", line 1\n'
-                           'pytesseract.pytesseract.TesseractError: (1, \'boom\')\n'
-                           'WARNING:pgsrip.core:trailing noise')
-            target.with_suffix('.srt').write_text(
-                '1\n00:00:01,000 --> 00:00:02,000\nhello there\n', 'utf-8')
-            return 0, ''
-        tracks = [{'id': 1, 'lang': 'eng'}, {'id': 2, 'lang': 'ita'},
-                  {'id': 3, 'lang': 'jpn'}, {'id': 4, 'lang': 'por'}]
-        job = {'log': []}
-        with patch.dict(sys.modules, {'cleanit': None, 'babelfish': None}), \
-                patch.object(app, 'installed_tesseract_languages',
-                             return_value={'eng', 'jpn', 'zho', 'chi_sim'}), \
-                patch.object(app, '_pgs_tracks', return_value=tracks), \
-                patch.object(app.subprocess, 'run', side_effect=extract), \
-                patch.object(app, '_run_pgsrip_progress', side_effect=rip), \
-                patch('builtins.print'):
-            result = app.ocr_subs(job, source, self.work)
-        self.assertEqual([spec.split(':', 1)[0] for spec in commands[0][3:]], ['1', '3'])
-        self.assertEqual(len(result), 1)
-        warning = job['warnings'][0]
-        self.assertIn('4条 PGS 中仅 1 条成功转成文本', warning)
-        self.assertIn('未成功的语言: ita、por、jpn', warning)
-        self.assertEqual(app.recorded_ocr_outcome({'warnings': [warning]}), (1, 4))
-        joined = '\n'.join(job['log'])
-        self.assertIn('镜像未安装 ita 识别模型', joined)
-        self.assertIn("TesseractError: (1, 'boom')", joined)
-
-    def test_all_tracks_lacking_models_skip_the_expensive_extraction(self):
-        source = self.inbox / 'movie.mkv'; source.write_bytes(b'x')
-        job = {'log': []}
-        with patch.dict(sys.modules, {'cleanit': None, 'babelfish': None}), \
-                patch.object(app, 'installed_tesseract_languages', return_value={'eng'}), \
-                patch.object(app, '_pgs_tracks', return_value=[{'id': 1, 'lang': 'spa'}]), \
-                patch.object(app.subprocess, 'run') as run:
-            self.assertEqual(app.ocr_subs(job, source, self.work), [])
-        run.assert_not_called()
-        self.assertIn('镜像未安装 spa 识别模型', job['warnings'][0])
-
-    def test_tesseract_model_names(self):
-        with patch.dict(sys.modules, {'cleanit': None, 'babelfish': None}):
-            self.assertEqual([app.tesseract_language_code(c) for c in ('chi', 'zho', 'jpn', 'fre', 'und')],
-                             ['zho', 'zho', 'jpn', 'fra', 'und'])
-        self.assertEqual(app.ocr_failure_reason('a\nValueError: bad\n  noise line'), 'ValueError: bad')
 
     # ---- 整条识别被系统杀掉时，分段识别 ----
     @staticmethod
@@ -481,114 +396,6 @@ class ReliabilityTests(unittest.TestCase):
             out += segment(0x16, pcs_clear, n * 1000 + 500) + segment(0x80, b'', n * 1000 + 500)
         return out
 
-    def test_sup_is_split_only_at_subtitle_starts(self):
-        sup = self.work / 'pgs_8.ja.sup'
-        original = self.fake_sup(450)
-        sup.write_bytes(original)
-        parts = app.split_sup(sup, per_chunk=200)
-        self.assertEqual([p.name for p in parts],
-                         ['pgs_8_part000.ja.sup', 'pgs_8_part001.ja.sup', 'pgs_8_part002.ja.sup'])
-        self.assertEqual(b''.join(p.read_bytes() for p in parts), original)
-        for part, expected in zip(parts, (200, 200, 50)):
-            data = part.read_bytes()
-            self.assertEqual(data[:2], b'PG')
-            self.assertEqual(data[10], 0x16)            # 每段都从一条字幕的起点开始
-            self.assertEqual(data[13 + 7], 0x80)
-            self.assertEqual(len(app.split_sup(part, per_chunk=1)), expected)
-        short = self.work / 'pgs_9.ja.sup'; short.write_bytes(self.fake_sup(150))
-        self.assertEqual(app.split_sup(short, per_chunk=200), [])      # 不够两段就不切
-        broken = self.work / 'pgs_7.ja.sup'; broken.write_bytes(original[:-5])
-        self.assertEqual(app.split_sup(broken, per_chunk=200), [])     # 结构不完整不冒险
-
-    def test_killed_whole_track_ocr_falls_back_to_chunks(self):
-        source = self.inbox / 'movie.mkv'; source.write_bytes(b'x')
-        seen = []
-        def extract(command, **_kwargs):
-            for spec in command[3:]:
-                Path(spec.split(':', 1)[1]).write_bytes(self.fake_sup(450))
-            return subprocess.CompletedProcess(command, 0, b'', b'')
-        def rip(_job, target, _base, _span):
-            seen.append(target.name)
-            if '_part' not in target.name:
-                return 0, "pytesseract.pytesseract.TesseractError: (-9, '')"
-            n = int(target.name.split('_part')[1][:3])
-            target.with_suffix('.srt').write_text(
-                f'1\n00:0{n}:01,000 --> 00:0{n}:02,000\nこんにちは{n}\n', 'utf-8')
-            return 0, ''
-        job = {'log': []}
-        with patch.dict(sys.modules, {'cleanit': None, 'babelfish': None}), \
-                patch.object(app, '_pgs_tracks', return_value=[{'id': 8, 'lang': 'jpn'}]), \
-                patch.object(app.subprocess, 'run', side_effect=extract), \
-                patch.object(app, '_run_pgsrip_progress', side_effect=rip):
-            result = app.ocr_subs(job, source, self.work)
-        self.assertEqual(seen, ['pgs_8.ja.sup', 'pgs_8_part000.ja.sup',
-                                'pgs_8_part001.ja.sup', 'pgs_8_part002.ja.sup'])
-        self.assertEqual(len(result), 1)
-        path, lang = result[0]
-        self.assertEqual((path.name, lang), ('pgs_8.ja.srt', 'jpn'))
-        merged = app.parse_srt_text(path.read_text('utf-8'))
-        self.assertEqual([c['text'] for c in merged], ['こんにちは0', 'こんにちは1', 'こんにちは2'])
-        self.assertEqual(job.get('warnings', []), [])
-        self.assertIn('改为分 3 段识别', '\n'.join(job['log']))
-        self.assertEqual(sorted(p.name for p in self.work.glob('pgs_*')), ['pgs_8.ja.srt'])
-
-    def test_chunk_fallback_refuses_to_deliver_a_subtitle_with_missing_parts(self):
-        source = self.inbox / 'movie.mkv'; source.write_bytes(b'x')
-        def extract(command, **_kwargs):
-            for spec in command[3:]:
-                Path(spec.split(':', 1)[1]).write_bytes(self.fake_sup(450))
-            return subprocess.CompletedProcess(command, 0, b'', b'')
-        def rip(_job, target, _base, _span):
-            if '_part001' in target.name or '_part' not in target.name:
-                return 0, "pytesseract.pytesseract.TesseractError: (-9, '')"
-            target.with_suffix('.srt').write_text('1\n00:00:01,000 --> 00:00:02,000\nテスト\n', 'utf-8')
-            return 0, ''
-        job = {'log': []}
-        with patch.dict(sys.modules, {'cleanit': None, 'babelfish': None}), \
-                patch.object(app, '_pgs_tracks', return_value=[{'id': 8, 'lang': 'jpn'}]), \
-                patch.object(app.subprocess, 'run', side_effect=extract), \
-                patch.object(app, '_run_pgsrip_progress', side_effect=rip), \
-                patch('builtins.print'):
-            self.assertEqual(app.ocr_subs(job, source, self.work), [])
-        self.assertIn('1/3 段失败', '\n'.join(job['log']))
-        self.assertIn('均未成功转成文本', job['warnings'][0])
-        self.assertEqual(list(self.work.glob('pgs_*')), [])
-
-    def test_pgs_extract_timeout_scales_with_file_size(self):
-        big = types.SimpleNamespace(stat=lambda: types.SimpleNamespace(st_size=80 * 1024**3))
-        with patch.object(app, 'Path', return_value=big):
-            self.assertGreater(app.pgs_extract_timeout('x'), 5000)
-
-    def test_pgs_extract_timeout_fails_tracks_without_raising(self):
-        source = self.inbox / 'movie.mkv'; source.write_bytes(b'x')
-        job = {'log': []}
-        with patch.object(app, '_pgs_tracks', return_value=[{'id': 3, 'lang': 'jpn'}]), \
-                patch.object(app.subprocess, 'run',
-                             side_effect=subprocess.TimeoutExpired('mkvextract', 1)):
-            self.assertEqual(app.ocr_subs(job, source, self.work), [])
-        self.assertIn('超时', job['warnings'][0])
-
-    def test_sup_is_named_with_the_code_pgsrip_reads_back(self):
-        # pgsrip 会把文件名里的语言解析后重拼成两字母码再去读文件；
-        # 三字母码命名的 SUP 它找不到（NAS 实测 9 条全部“未产出 SRT”的原因）。
-        source = self.inbox / 'movie.mkv'; source.write_bytes(b'x')
-        seen = []
-        def extract(command, **_kwargs):
-            for spec in command[3:]:
-                Path(spec.split(':', 1)[1]).write_bytes(b'PG')
-            return subprocess.CompletedProcess(command, 0, b'', b'')
-        def rip(_job, target, _base, _span):
-            seen.append(target.name)
-            return 0, ''
-        tracks = [{'id': 1, 'lang': 'eng'}, {'id': 2, 'lang': 'chi'},
-                  {'id': 3, 'lang': 'jpn'}, {'id': 4, 'lang': 'und'}, {'id': 5, 'lang': 'por'}]
-        with patch.dict(sys.modules, {'cleanit': None, 'babelfish': None}), \
-                patch.object(app, '_pgs_tracks', return_value=tracks), \
-                patch.object(app.subprocess, 'run', side_effect=extract), \
-                patch.object(app, '_run_pgsrip_progress', side_effect=rip):
-            app.ocr_subs({'log': []}, source, self.work)
-        self.assertEqual(seen, ['pgs_1.en.sup', 'pgs_2.zh.sup', 'pgs_3.ja.sup',
-                                'pgs_4.zh.sup', 'pgs_5.pt.sup'])
 
     def test_snapshot_recorded_by_previous_version_still_allows_deletion(self):
         source, output = self.finished_source(directory=True)
@@ -613,39 +420,6 @@ class ReliabilityTests(unittest.TestCase):
         app.PROCESSED[source.name].update(format_preview=planned, **record)
         return next(i for i in app.api_state()['items'] if i['name'] == source.name)
 
-    def test_finished_item_reports_total_ocr_failure_from_legacy_warning(self):
-        shown = self.done_item_with_pgs({'warnings': [
-            '9条 PGS 均未成功转成文本（第1条 pgsrip 未产出 SRT），成品不含盘内字幕']})
-        self.assertNotIn(app.OCR_PLANNED_DETAIL, shown['format_preview']['target_detail'])
-        self.assertIn('9 条 PGS 均未转成文本', shown['format_preview']['target_detail'])
-        self.assertIn('⚠ 图形字幕OCR失败 0/9', shown['plan'])
-        self.assertNotIn('9条图形字幕OCR成文本', shown['plan'])
-        # 保存的记录本身不被改写
-        name = shown['name']
-        self.assertIn(app.OCR_PLANNED_DETAIL, app.PROCESSED[name]['format_preview']['target_detail'])
-
-    def test_finished_item_reports_partial_and_full_ocr(self):
-        partial = self.done_item_with_pgs({'ocr': {'ok': 4, 'total': 9}})
-        self.assertIn('仅 4/9 条', partial['format_preview']['target_detail'])
-        self.assertIn('⚠ 图形字幕OCR仅成功 4/9', partial['plan'])
-        self.assertEqual(app.apply_ocr_outcome(
-            {'target_detail': 'a · ' + app.OCR_PLANNED_DETAIL}, ['9条图形字幕OCR成文本'], (9, 9)),
-            ({'target_detail': 'a · 9 条 PGS 已按原时间轴 OCR 为文本'}, ['9条图形字幕已OCR成文本']))
-        self.assertEqual(app.apply_ocr_outcome(None, ['x'], None), (None, ['x']))
-
-    def test_finished_item_after_restart_does_not_say_waiting_for_probe(self):
-        # 重启后已完成条目没有探测结果，内存里的计划是空的（NAS 升级后实际出现）。
-        source, output = self.finished_source()
-        app.ITEMS[source.name].update(size=8, probe=None, payload=str(source),
-                                      error=None, plan=[], clean=False)
-        app.PROCESSED[source.name]['warnings'] = ['9条 PGS 均未成功转成文本（x），成品不含盘内字幕']
-        legacy = next(i for i in app.api_state()['items'] if i['name'] == source.name)
-        self.assertEqual(legacy['plan'], ['⚠ 图形字幕OCR失败 0/9'])
-        app.PROCESSED[source.name].update(
-            plan=['5条音轨→EAC3', '9条图形字幕OCR成文本'], ocr={'ok': 9, 'total': 9})
-        stored = next(i for i in app.api_state()['items'] if i['name'] == source.name)
-        self.assertEqual(stored['plan'], ['5条音轨→EAC3', '9条图形字幕已OCR成文本'])
-        self.assertIn("it.status==='done'?tag('t-ok','已入库')", app.PAGE)
 
     def test_multi_disc_preview_does_not_promise_a_probe(self):
         preview = app.format_preview('multi_disc', None, '')

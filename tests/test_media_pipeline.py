@@ -62,6 +62,14 @@ def probe(video_codec="h264", *, height=1080, dv=0, audio="eac3", subs=None):
     }
 
 
+def saved_candidate(name):
+    """转换前暂存的那份字幕：(文件位置, 字幕段)；没有时返回 None。"""
+    path = app.subtitle_candidate_path(name)
+    if not path.is_file():
+        return None
+    return path, app.parse_srt_text(path.read_text("utf-8"))
+
+
 class PipelineTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -94,8 +102,6 @@ class PipelineTests(unittest.TestCase):
             UPGRADE_STATE={"status": "idle"},
             ACTIVE_OPERATIONS=set(),
             PIPELINE_HALT="",
-            # 测试不依赖本机是否装了 Tesseract；需要时由用例自行指定已装模型。
-            installed_tesseract_languages=lambda: None,
         )
         self.globals.start()
 
@@ -108,132 +114,6 @@ class PipelineTests(unittest.TestCase):
         path.write_text(body, "utf-8")
         return path
 
-    def test_sparse_chinese_srt_is_kept(self):
-        path = self.write_srt(
-            "forced.srt",
-            "1\n00:00:10,000 --> 00:00:12,000\n危险\n",
-        )
-        self.assertEqual(app._classify_srt(path, "und"), "zho")
-        self.assertEqual(app._inspect_srt(path)["cue_count"], 1)
-
-    def test_sparse_kanji_uses_japanese_track_language(self):
-        path = self.write_srt(
-            "sign.srt",
-            "1\n00:10:10,000 --> 00:10:12,000\n入口\n",
-        )
-        self.assertEqual(app._classify_srt(path, "jpn"), "jpn")
-
-    def test_timecode_only_srt_is_rejected(self):
-        path = self.write_srt(
-            "empty.srt",
-            "1\n00:00:10,000 --> 00:00:12,000\n\n",
-        )
-        self.assertIsNone(app._classify_srt(path, "zho"))
-
-    def test_pgsrip_returns_diagnostics_instead_of_swallowing_them(self):
-        class FakePopen:
-            def __init__(self, *_args, **_kwargs):
-                self.stdout = io.BytesIO(
-                    b"1 PGS subtitle collected\rRipping subtitles  50%\r"
-                    b"tesseract language error\n"
-                )
-                self.returncode = 2
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def wait(self):
-                return self.returncode
-
-        job = {"percent": 0}
-        with patch.object(app.subprocess, "Popen", FakePopen):
-            code, diagnostic = app._run_pgsrip_progress(
-                job, self.work / "track.mkv", 0, 100
-            )
-
-        self.assertEqual(code, 2)
-        self.assertIn("tesseract language error", diagnostic)
-        self.assertEqual(job["percent"], 50)
-
-    def test_mkvmerge_ocr_extraction_failure_is_persistently_explained(self):
-        source = self.inbox / "movie.mkv"
-        source.write_bytes(b"x")
-        job = {"log": []}
-        failed = subprocess.CompletedProcess(
-            args=["mkvmerge"], returncode=2, stdout=b"", stderr=b"bad track id"
-        )
-        with patch.object(app, "_pgs_tracks", return_value=[{"id": 7, "lang": "zho"}]), \
-                patch.object(app.subprocess, "run", return_value=failed):
-            result = app.ocr_subs(job, source, self.work)
-
-        self.assertEqual(result, [])
-        self.assertIn("抽取失败", job["warnings"][0])
-        self.assertIn("bad track id", job["warnings"][0])
-
-    def test_pgs_is_extracted_to_sup_before_pgsrip(self):
-        source = self.inbox / "movie.mkv"
-        source.write_bytes(b"x")
-        seen = {}
-
-        def extract(command, **_kwargs):
-            seen["extract"] = command
-            sup = Path(command[-1].split(":", 1)[1])
-            sup.write_bytes(b"PG")
-            return subprocess.CompletedProcess(command, 0, b"ok", b"")
-
-        def rip(_job, target, _base, _span):
-            seen["rip_target"] = target
-            target.with_suffix(".srt").write_text(
-                "1\n00:00:01,000 --> 00:00:02,000\nこんにちは\n", "utf-8"
-            )
-            return 0, "done"
-
-        with patch.object(app, "_pgs_tracks", return_value=[{"id": 7, "lang": "jpn"}]), \
-                patch.object(app.subprocess, "run", side_effect=extract), \
-                patch.object(app, "_run_pgsrip_progress", side_effect=rip):
-            result = app.ocr_subs({"log": []}, source, self.work)
-
-        self.assertEqual(seen["extract"][:3], ["mkvextract", str(source), "tracks"])
-        self.assertTrue(str(seen["extract"][-1]).startswith("7:"))
-        self.assertEqual(seen["rip_target"].suffix, ".sup")
-        self.assertEqual(result[0][1], "jpn")
-        self.assertFalse(seen["rip_target"].exists())
-
-    def test_m2ts_pgs_is_losslessly_normalized_before_sup_extraction(self):
-        source = self.inbox / "movie.m2ts"
-        source.write_bytes(b"transport stream")
-        commands = []
-
-        def run(command, **_kwargs):
-            commands.append(command)
-            if command[0] == "mkvmerge":
-                Path(command[2]).write_bytes(b"matroska")
-            elif command[0] == "mkvextract":
-                Path(command[-1].split(":", 1)[1]).write_bytes(b"PG")
-            return subprocess.CompletedProcess(command, 0, b"", b"")
-
-        def rip(_job, target, _base, _span):
-            target.with_suffix(".srt").write_text(
-                "1\n00:00:01,000 --> 00:00:02,000\n日本語\n", "utf-8"
-            )
-            return 0, ""
-
-        with patch.object(
-            app, "_pgs_tracks", return_value=[{"id": 2, "lang": "jpn"}]
-        ) as tracks, patch.object(app.subprocess, "run", side_effect=run), \
-                patch.object(app, "_run_pgsrip_progress", side_effect=rip):
-            result = app.ocr_subs({"log": []}, source, self.work)
-
-        normalized = self.work / "pgs_source.mkv"
-        tracks.assert_called_once_with(normalized)
-        self.assertEqual(commands[0], [
-            "mkvmerge", "-o", str(normalized), str(source)
-        ])
-        self.assertEqual(commands[1][0:2], ["mkvextract", str(normalized)])
-        self.assertEqual(result[0][1], "jpn")
 
     def test_unprobed_iso_preview_says_it_will_pre_read(self):
         preview = app.format_preview(
@@ -481,27 +361,6 @@ SINFO:0,0,21,0,"23.976 (24000/1001)"
         self.assertIn("正在预读", response["warnings"][0])
         self.assertEqual(app.JOB_QUEUE, [])
 
-    def test_retry_keeps_old_output_and_restores_source_to_ready(self):
-        source = self.inbox / "movie.iso"
-        source.write_bytes(b"source")
-        self.movies.mkdir()
-        output = self.movies / "movie.mkv"
-        output.write_bytes(b"old output")
-        app.ITEMS[source.name] = {
-            "name": source.name, "status": "done", "error": None
-        }
-        app.PROCESSED[source.name] = {
-            "output": str(output), "ts": "07-25 20:00", "warnings": ["OCR失败"]
-        }
-        with patch.object(
-            app.request, "get_json", return_value={"name": source.name}, create=True
-        ):
-            response = app.api_retry()
-        self.assertTrue(response["ok"])
-        self.assertEqual(app.ITEMS[source.name]["status"], "ready")
-        self.assertNotIn(source.name, app.PROCESSED)
-        self.assertTrue(output.exists())
-        self.assertTrue(source.exists())
 
     def test_rebuild_deletes_only_tracked_movie_output_and_keeps_source(self):
         source = self.inbox / "movie.iso"
@@ -573,68 +432,6 @@ SINFO:0,0,21,0,"23.976 (24000/1001)"
         self.assertFalse(output.exists())
         self.assertTrue(candidate.exists())
 
-    def test_human_chinese_subtitle_is_retimed_and_only_gaps_use_ai(self):
-        name = "movie.iso"
-        candidate = app.subtitle_candidate_path(name)
-        candidate.parent.mkdir(parents=True)
-        candidate_cues = [
-            {"start": 10_000 + i * 10_000, "end": 12_000 + i * 10_000,
-             "text": f"人工译文{i}"}
-            for i in range(8)
-        ]
-        app.write_srt(candidate, candidate_cues)
-        japanese = self.work / "japanese.srt"
-        anchor_cues = [
-            {"start": 610_000 + i * 10_000, "end": 612_000 + i * 10_000,
-             "text": f"日本語{i}"}
-            for i in range(8)
-        ]
-        anchor_cues.append(
-            {"start": 705_000, "end": 707_000, "text": "追加の台詞"}
-        )
-        app.write_srt(japanese, anchor_cues)
-
-        def translate(cues, _config):
-            self.assertEqual([cue["text"] for cue in cues], ["追加の台詞"])
-            return [{**cues[0], "text": "AI补译缺段", "origin": "ai"}]
-
-        job = {"log": []}
-        with patch.object(app, "subtitle_ai_config", return_value={"configured": True}), \
-                patch.object(app, "ai_translate_missing", side_effect=translate):
-            output = app.build_hybrid_chinese_subtitle(
-                job, name, [(japanese, "jpn")], self.work
-            )
-
-        cues = app.parse_srt_text(output.read_text("utf-8"))
-        self.assertEqual(cues[0]["start"], 610_000)
-        self.assertEqual(cues[0]["text"], "人工译文0")
-        self.assertEqual(cues[-1]["text"], "AI补译缺段")
-        self.assertTrue(any("匹配度" in line for line in job["log"]))
-
-    def test_subtitle_candidate_api_normalizes_uploaded_srt(self):
-        name = "movie.iso"
-        app.ITEMS[name] = {"name": name, "status": "ready"}
-        text = "\n\n".join(
-            f"{i + 1}\n00:00:{i:02d},000 --> 00:00:{i:02d},800\n人工译文{i}"
-            for i in range(5)
-        ).encode("utf-8")
-        upload = types.SimpleNamespace(
-            filename="release.zh-CN.srt",
-            read=lambda _limit: text,
-        )
-        with patch.object(app.request, "form", {"name": name}, create=True), \
-                patch.object(
-                    app.request, "files", {"subtitle": upload}, create=True
-                ):
-            response = app.api_subtitle_candidate()
-        self.assertTrue(response["ok"])
-        self.assertEqual(response["cue_count"], 5)
-        saved = app.load_subtitle_candidate(name)
-        self.assertEqual(saved[1][0]["text"], "人工译文0")
-        self.assertEqual(
-            saved[0].with_suffix(".name").read_text("utf-8"),
-            "release.zh-CN.srt",
-        )
 
     def test_jellyfin_subtitle_listing_treats_numeric_suffix_as_order_only(self):
         raw = "\n".join([
@@ -654,115 +451,6 @@ SINFO:0,0,21,0,"23.976 (24000/1001)"
         self.assertNotIn("人工", rendered)
         self.assertNotIn("AI", rendered)
 
-    def test_jellyfin_selected_subtitle_is_saved_as_persistent_candidate(self):
-        name = "movie.iso"
-        app.ITEMS[name] = {"name": name, "status": "ready"}
-        text = "\n\n".join(
-            f"{i + 1}\n00:00:{i:02d},000 --> 00:00:{i:02d},800\n下载译文{i}"
-            for i in range(5)
-        ).encode("utf-8")
-        with patch.object(
-            app.request, "get_json",
-            return_value={"name": name, "subtitle_id": "safe-id"},
-            create=True,
-        ), patch.object(
-            app, "jellyfin_subtitle_bytes",
-            return_value=("Movie.zho.1.srt", text),
-        ):
-            response = app.api_jellyfin_subtitle_candidate()
-        self.assertTrue(response["ok"])
-        saved = app.load_subtitle_candidate(name)
-        self.assertEqual(saved[1][0]["text"], "下载译文0")
-        self.assertEqual(
-            saved[0].with_suffix(".name").read_text("utf-8"),
-            "Movie.zho.1.srt",
-        )
-
-    def test_finished_movie_gets_aligned_sidecar_without_rewriting_video(self):
-        name = "movie.iso"
-        self.movies.mkdir()
-        output = self.movies / "movie.mp4"
-        original_video = b"finished-video-must-not-change"
-        output.write_bytes(original_video)
-        app.ITEMS[name] = {"name": name, "status": "done"}
-        app.PROCESSED[name] = {"output": str(output)}
-        # 参照是转换时存下的“影片自带字幕的时间点”：只有时间，没有文字
-        app.write_settings_json(app.subtitle_timing_path(output), {"tracks": [{
-            "codec": "hdmv_pgs_subtitle", "lang": "jpn",
-            "points": [[610_000 + i * 10_000, 612_000 + i * 10_000] for i in range(8)]}]})
-        candidate_path = self.work / "candidate.srt"
-        app.write_srt(candidate_path, [
-            {
-                "start": 10_000 + i * 10_000,
-                "end": 12_000 + i * 10_000,
-                "text": f"人工译文{i}",
-            }
-            for i in range(8)
-        ])
-        with patch.object(app, "subtitle_ai_config", return_value=None):
-            # 打开窗口：只显示原样，不自动算，但告诉页面“可以自动校准”
-            opened = app.store_candidate_for_item(
-                name, "release.zho.0.srt", candidate_path.read_bytes()
-            )
-            self.assertTrue(opened["confirmation_required"])
-            self.assertFalse(opened["automatic_available"])
-            self.assertTrue(opened["can_auto"])
-            self.assertEqual(opened["automatic_first_start_ms"], 10_000)
-            # 用户点了“自动校准”：给出结果，仍不写文件；点应用才生效
-            preview = app.store_candidate_for_item(
-                name, "release.zho.0.srt", candidate_path.read_bytes(), auto=True
-            )
-            self.assertTrue(preview["confirmation_required"])
-            self.assertTrue(preview["automatic_available"])
-            self.assertEqual(preview["automatic_first_start_ms"], 610_000)
-            self.assertFalse(app.subtitle_sidecar_path(output).exists())
-            result = app.store_candidate_for_item(
-                name, "release.zho.0.srt", candidate_path.read_bytes(),
-                confirm_audio=True, manual_first_start_ms=610_000,
-            )
-        sidecar = app.subtitle_sidecar_path(output)
-        self.assertTrue(result["applied"])
-        self.assertTrue(sidecar.is_file())
-        self.assertEqual(output.read_bytes(), original_video)
-        cues = app.parse_srt_text(sidecar.read_text("utf-8"))
-        self.assertEqual(cues[0]["start"], 610_000)
-        self.assertEqual(cues[0]["text"], "人工译文0")
-        self.assertEqual(result["scale"], 1.0)
-
-    def test_movie_without_timing_reference_asks_for_the_first_line_time(self):
-        name = "movie.iso"
-        self.movies.mkdir()
-        output = self.movies / "movie.mp4"
-        original_video = b"finished-video-must-not-change"
-        output.write_bytes(original_video)
-        app.ITEMS[name] = {"name": name, "status": "done"}
-        app.PROCESSED[name] = {"output": str(output)}
-        candidate_path = self.work / "candidate.srt"
-        app.write_srt(candidate_path, [
-            {"start": 10_000 + i * 10_000, "end": 12_000 + i * 10_000, "text": f"人工译文{i}"}
-            for i in range(8)
-        ])
-        with patch.object(app, "align_chinese_subtitle_by_audio",
-                          side_effect=AssertionError("不应再靠声音估时间")):
-            opened = app.store_candidate_for_item(name, "release.zho.srt", candidate_path.read_bytes())
-            self.assertFalse(opened["can_auto"])                       # 没有参照：页面上“自动校准”不可点
-            self.assertEqual(opened["automatic_error"], "")
-            preview = app.store_candidate_for_item(name, "release.zho.srt", candidate_path.read_bytes(), auto=True)
-            self.assertTrue(preview["confirmation_required"])
-            self.assertFalse(preview["automatic_available"])
-            self.assertIn("无可参照的字幕时间点", preview["automatic_error"])
-            self.assertEqual(preview["preview_cues"][0]["start_ms"], 10_000)       # 预览就是原样，没乱挪
-            self.assertFalse(app.subtitle_sidecar_path(output).exists())
-            self.assertIsNone(app.load_subtitle_candidate(name))
-            applied = app.store_candidate_for_item(
-                name, "release.zho.srt", candidate_path.read_bytes(),
-                confirm_audio=True, manual_first_start_ms=625_500)
-        sidecar = app.subtitle_sidecar_path(output)
-        self.assertTrue(applied["applied"])
-        self.assertEqual(applied["alignment_method"], "manual_first_cue")
-        self.assertEqual(applied["offset_seconds"], 615.5)
-        self.assertEqual(output.read_bytes(), original_video)
-        self.assertEqual(app.parse_srt_text(sidecar.read_text("utf-8"))[0]["start"], 625_500)
 
     def test_timing_reference_that_does_not_match_falls_back_to_manual(self):
         # 参照和字幕对不上（不同剪辑版）：不硬套，改让用户手动填
@@ -851,135 +539,6 @@ SINFO:0,0,21,0,"23.976 (24000/1001)"
             with self.assertRaises(ValueError):
                 app.normalize_manual_first_start_ms(invalid, 7_080_000)
 
-    def test_audio_alignment_uses_large_offset_guard_and_multi_segment_mode(self):
-        video = self.work / "movie.mp4"
-        video.write_bytes(b"video")
-        output = self.work / "aligned.srt"
-        cues = [
-            {"start": i * 10_000, "end": i * 10_000 + 2_000, "text": f"字幕{i}"}
-            for i in range(8)
-        ]
-        seen = {}
-
-        def run(arguments):
-            seen["arguments"] = arguments
-            app.write_srt(output, [
-                {**cue, "start": cue["start"] + 600_000,
-                 "end": cue["end"] + 600_000}
-                for cue in cues
-            ])
-            return {
-                "sync_was_successful": True,
-                "offset_seconds": 600.0,
-                "framerate_scale_factor": 1.0,
-            }
-
-        with patch.object(app, "_run_ffsubsync", side_effect=run), \
-                patch.object(app, "ffprobe", return_value=None):
-            aligned, meta = app.align_chinese_subtitle_by_audio(
-                {"log": []}, video, cues, output
-            )
-        self.assertEqual(aligned, output)
-        self.assertEqual(meta["offset_seconds"], 600.0)
-        self.assertIn("--multi-segment-sync", seen["arguments"])
-        self.assertEqual(
-            seen["arguments"][seen["arguments"].index("--max-offset-seconds") + 1],
-            "1200",
-        )
-
-    def test_low_quality_audio_alignment_removes_unsynced_output(self):
-        video = self.work / "movie.mp4"
-        video.write_bytes(b"video")
-        output = self.work / "aligned.srt"
-        cues = [
-            {"start": i * 10_000, "end": i * 10_000 + 2_000, "text": f"字幕{i}"}
-            for i in range(8)
-        ]
-
-        def low_quality(_arguments):
-            app.write_srt(output, cues)
-            return {
-                "sync_was_successful": False,
-                "offset_seconds": 0.0,
-                "framerate_scale_factor": 1.0,
-            }
-
-        with patch.object(app, "_run_ffsubsync", side_effect=low_quality):
-            with self.assertRaisesRegex(ValueError, "可信度"):
-                app.align_chinese_subtitle_by_audio(
-                    {"log": []}, video, cues, output
-                )
-        self.assertFalse(output.exists())
-
-    def test_remove_candidate_deletes_sidecar_but_keeps_video_and_anchor(self):
-        name = "movie.iso"
-        self.movies.mkdir()
-        output = self.movies / "movie.mp4"
-        output.write_bytes(b"video")
-        app.ITEMS[name] = {"name": name, "status": "done"}
-        sidecar = app.subtitle_sidecar_path(output)
-        sidecar.write_text(
-            "1\n00:00:01,000 --> 00:00:02,000\n中文字幕\n", "utf-8"
-        )
-        app.PROCESSED[name] = {
-            "output": str(output), "subtitle_sidecar": str(sidecar)
-        }
-        candidate = app.subtitle_candidate_path(name)
-        candidate.parent.mkdir(parents=True)
-        candidate.write_text(
-            "1\n00:00:01,000 --> 00:00:02,000\n候选字幕\n", "utf-8"
-        )
-        candidate.with_suffix(".name").write_text("wrong.srt", "utf-8")
-        anchor = app.subtitle_anchor_path(name)
-        anchor.parent.mkdir(parents=True)
-        anchor.write_text(
-            "1\n00:00:01,000 --> 00:00:02,000\n日本語\n", "utf-8"
-        )
-        removed = app.remove_candidate_and_sidecar(name)
-        self.assertTrue(removed)
-        self.assertFalse(candidate.exists())
-        self.assertFalse(sidecar.exists())
-        self.assertTrue(output.exists())
-        self.assertTrue(anchor.exists())
-
-    def test_ai_translator_sends_only_requested_missing_cues(self):
-        seen = {}
-
-        class Response:
-            status = 200
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def read(self):
-                return (
-                    b'{"choices":[{"message":{"content":'
-                    b'"[{\\"id\\":0,\\"text\\":\\"AI translated\\"}]"}}]}'
-                )
-
-        def urlopen(request, timeout):
-            seen["payload"] = json.loads(request.data.decode("utf-8"))
-            seen["timeout"] = timeout
-            return Response()
-
-        missing = [{"start": 1_000, "end": 2_000, "text": "不足部分"}]
-        with patch.object(app.urlrequest, "urlopen", side_effect=urlopen):
-            translated = app.ai_translate_missing(
-                missing,
-                {
-                    "endpoint": "https://example.invalid/v1/chat/completions",
-                    "api_key": "secret",
-                    "model": "subtitle-model",
-                },
-            )
-        user_prompt = seen["payload"]["messages"][1]["content"]
-        self.assertIn("不足部分", user_prompt)
-        self.assertNotIn("人工译文", user_prompt)
-        self.assertEqual(translated[0]["text"], "AI translated")
-        self.assertEqual(seen["timeout"], 90)
 
     def test_low_confidence_candidate_is_not_forced_onto_disc(self):
         anchor = [
@@ -1085,6 +644,193 @@ SINFO:0,0,21,0,"23.976 (24000/1001)"
         self.assertIn("if old_renamed:", app.UPGRADE_HELPER)
         self.assertIn("if old_stopped:", app.UPGRADE_HELPER)
 
+    def test_subtitle_candidate_api_normalizes_uploaded_srt(self):
+        name = "movie.iso"
+        app.ITEMS[name] = {"name": name, "status": "ready"}
+        text = "\n\n".join(
+            f"{i + 1}\n00:00:{i:02d},000 --> 00:00:{i:02d},800\n人工译文{i}"
+            for i in range(5)
+        ).encode("utf-8")
+        upload = types.SimpleNamespace(
+            filename="release.zh-CN.srt",
+            read=lambda _limit: text,
+        )
+        with patch.object(app.request, "form", {"name": name}, create=True), \
+                patch.object(
+                    app.request, "files", {"subtitle": upload}, create=True
+                ):
+            response = app.api_subtitle_candidate()
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["cue_count"], 5)
+        saved = saved_candidate(name)
+        self.assertEqual(saved[1][0]["text"], "人工译文0")
+        self.assertEqual(
+            saved[0].with_suffix(".name").read_text("utf-8"),
+            "release.zh-CN.srt",
+        )
+
+    def test_jellyfin_selected_subtitle_is_saved_as_persistent_candidate(self):
+        name = "movie.iso"
+        app.ITEMS[name] = {"name": name, "status": "ready"}
+        text = "\n\n".join(
+            f"{i + 1}\n00:00:{i:02d},000 --> 00:00:{i:02d},800\n下载译文{i}"
+            for i in range(5)
+        ).encode("utf-8")
+        with patch.object(
+            app.request, "get_json",
+            return_value={"name": name, "subtitle_id": "safe-id"},
+            create=True,
+        ), patch.object(
+            app, "jellyfin_subtitle_bytes",
+            return_value=("Movie.zho.1.srt", text),
+        ):
+            response = app.api_jellyfin_subtitle_candidate()
+        self.assertTrue(response["ok"])
+        saved = saved_candidate(name)
+        self.assertEqual(saved[1][0]["text"], "下载译文0")
+        self.assertEqual(
+            saved[0].with_suffix(".name").read_text("utf-8"),
+            "Movie.zho.1.srt",
+        )
+
+    def test_finished_movie_gets_aligned_sidecar_without_rewriting_video(self):
+        name = "movie.iso"
+        self.movies.mkdir()
+        output = self.movies / "movie.mp4"
+        original_video = b"finished-video-must-not-change"
+        output.write_bytes(original_video)
+        app.ITEMS[name] = {"name": name, "status": "done"}
+        app.PROCESSED[name] = {"output": str(output)}
+        # 参照是转换时存下的“影片自带字幕的时间点”：只有时间，没有文字
+        app.write_settings_json(app.subtitle_timing_path(output), {"tracks": [{
+            "codec": "hdmv_pgs_subtitle", "lang": "jpn",
+            "points": [[610_000 + i * 10_000, 612_000 + i * 10_000] for i in range(8)]}]})
+        candidate_path = self.work / "candidate.srt"
+        app.write_srt(candidate_path, [
+            {
+                "start": 10_000 + i * 10_000,
+                "end": 12_000 + i * 10_000,
+                "text": f"人工译文{i}",
+            }
+            for i in range(8)
+        ])
+        if True:
+            # 打开窗口：只显示原样，不自动算，但告诉页面“可以自动校准”
+            opened = app.store_candidate_for_item(
+                name, "release.zho.0.srt", candidate_path.read_bytes()
+            )
+            self.assertTrue(opened["confirmation_required"])
+            self.assertFalse(opened["automatic_available"])
+            self.assertTrue(opened["can_auto"])
+            self.assertEqual(opened["automatic_first_start_ms"], 10_000)
+            # 用户点了“自动校准”：给出结果，仍不写文件；点应用才生效
+            preview = app.store_candidate_for_item(
+                name, "release.zho.0.srt", candidate_path.read_bytes(), auto=True
+            )
+            self.assertTrue(preview["confirmation_required"])
+            self.assertTrue(preview["automatic_available"])
+            self.assertEqual(preview["automatic_first_start_ms"], 610_000)
+            self.assertFalse(app.subtitle_sidecar_path(output).exists())
+            result = app.store_candidate_for_item(
+                name, "release.zho.0.srt", candidate_path.read_bytes(),
+                confirm_audio=True, manual_first_start_ms=610_000,
+            )
+        sidecar = app.subtitle_sidecar_path(output)
+        self.assertTrue(result["applied"])
+        self.assertTrue(sidecar.is_file())
+        self.assertEqual(output.read_bytes(), original_video)
+        cues = app.parse_srt_text(sidecar.read_text("utf-8"))
+        self.assertEqual(cues[0]["start"], 610_000)
+        self.assertEqual(cues[0]["text"], "人工译文0")
+        self.assertEqual(result["scale"], 1.0)
+
+    def test_movie_without_timing_reference_asks_for_the_first_line_time(self):
+        name = "movie.iso"
+        self.movies.mkdir()
+        output = self.movies / "movie.mp4"
+        original_video = b"finished-video-must-not-change"
+        output.write_bytes(original_video)
+        app.ITEMS[name] = {"name": name, "status": "done"}
+        app.PROCESSED[name] = {"output": str(output)}
+        candidate_path = self.work / "candidate.srt"
+        app.write_srt(candidate_path, [
+            {"start": 10_000 + i * 10_000, "end": 12_000 + i * 10_000, "text": f"人工译文{i}"}
+            for i in range(8)
+        ])
+        if True:
+            opened = app.store_candidate_for_item(name, "release.zho.srt", candidate_path.read_bytes())
+            self.assertFalse(opened["can_auto"])                       # 没有参照：页面上“自动校准”不可点
+            self.assertEqual(opened["automatic_error"], "")
+            preview = app.store_candidate_for_item(name, "release.zho.srt", candidate_path.read_bytes(), auto=True)
+            self.assertTrue(preview["confirmation_required"])
+            self.assertFalse(preview["automatic_available"])
+            self.assertIn("无可参照的字幕时间点", preview["automatic_error"])
+            self.assertEqual(preview["preview_cues"][0]["start_ms"], 10_000)       # 预览就是原样，没乱挪
+            self.assertFalse(app.subtitle_sidecar_path(output).exists())
+            self.assertIsNone(saved_candidate(name))
+            applied = app.store_candidate_for_item(
+                name, "release.zho.srt", candidate_path.read_bytes(),
+                confirm_audio=True, manual_first_start_ms=625_500)
+        sidecar = app.subtitle_sidecar_path(output)
+        self.assertTrue(applied["applied"])
+        self.assertEqual(applied["alignment_method"], "manual_first_cue")
+        self.assertEqual(applied["offset_seconds"], 615.5)
+        self.assertEqual(output.read_bytes(), original_video)
+        self.assertEqual(app.parse_srt_text(sidecar.read_text("utf-8"))[0]["start"], 625_500)
+
+    def test_remove_candidate_deletes_sidecar_but_keeps_video_and_anchor(self):
+        name = "movie.iso"
+        self.movies.mkdir()
+        output = self.movies / "movie.mp4"
+        output.write_bytes(b"video")
+        app.ITEMS[name] = {"name": name, "status": "done"}
+        sidecar = app.subtitle_sidecar_path(output)
+        sidecar.write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\n中文字幕\n", "utf-8"
+        )
+        app.PROCESSED[name] = {
+            "output": str(output), "subtitle_sidecar": str(sidecar)
+        }
+        candidate = app.subtitle_candidate_path(name)
+        candidate.parent.mkdir(parents=True)
+        candidate.write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\n候选字幕\n", "utf-8"
+        )
+        candidate.with_suffix(".name").write_text("wrong.srt", "utf-8")
+        anchor = app.WORK / "subtitle_timing" / "keep.json"      # 别的资料不该被连带删掉
+        anchor.parent.mkdir(parents=True)
+        anchor.write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\n日本語\n", "utf-8"
+        )
+        removed = app.remove_candidate_and_sidecar(name)
+        self.assertTrue(removed)
+        self.assertFalse(candidate.exists())
+        self.assertFalse(sidecar.exists())
+        self.assertTrue(output.exists())
+        self.assertTrue(anchor.exists())
+
+    def test_retry_keeps_old_output_and_restores_source_to_ready(self):
+        source = self.inbox / "movie.iso"
+        source.write_bytes(b"source")
+        self.movies.mkdir()
+        output = self.movies / "movie.mkv"
+        output.write_bytes(b"old output")
+        app.ITEMS[source.name] = {
+            "name": source.name, "status": "done", "error": None
+        }
+        app.PROCESSED[source.name] = {
+            "output": str(output), "ts": "07-25 20:00", "warnings": ["旧警告"]
+        }
+        with patch.object(
+            app.request, "get_json", return_value={"name": source.name}, create=True
+        ):
+            response = app.api_retry()
+        self.assertTrue(response["ok"])
+        self.assertEqual(app.ITEMS[source.name]["status"], "ready")
+        self.assertNotIn(source.name, app.PROCESSED)
+        self.assertTrue(output.exists())
+        self.assertTrue(source.exists())
+
 
 class InterfaceRegressionTests(unittest.TestCase):
     def test_dashboard_keeps_safety_controls(self):
@@ -1118,12 +864,6 @@ class InterfaceRegressionTests(unittest.TestCase):
                      "封装MKV", "探测流信息"):
             self.assertNotIn(gone, app.PAGE.split("<script>")[0])
         self.assertIn("plainPhase(j.phase)", app.PAGE)
-
-    def test_docker_image_exposes_chinese_model_name_expected_by_pgsrip(self):
-        dockerfile = (APP_PATH.parent / "Dockerfile").read_text()
-        self.assertIn("zho.traineddata", dockerfile)
-        self.assertIn("pgsrip==0.1.12", dockerfile)
-        self.assertIn("ffsubsync==0.5.0", dockerfile)
 
 
 if __name__ == "__main__":
