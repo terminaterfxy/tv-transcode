@@ -1,12 +1,13 @@
 # TV转码：把下载的影片整理成电视（经 Jellyfin）能直接播放的格式。
 # 用法：改好下面标了“改”的几处，然后 docker compose up -d，浏览器打开 http://NAS地址:8097
+# 群晖等 NAS：在 Docker / Container Manager 里新建“项目”，把这份文件贴进去即可。
 #
 # 安全：面板没有登录，并且拿着 Docker 套接字（等于这台机器的最高权限）。只在家里局域网用，不要映射到公网。
 
 services:
   tv-transcode:
-    build: .                              # 从本目录的 Dockerfile 和 app.py 构建
-    image: tv-transcode
+    image: ghcr.io/terminaterfxy/tv-transcode:latest
+    # build: .                            # 想自己从源码构建：克隆仓库后去掉这行的注释，并执行 docker compose up -d --build
     container_name: mediapanel            # 改了名字要同时设置下面的 PANEL_CONTAINER
     network_mode: host                    # 不用 host 网络时删掉这行，改用下面的 ports
     # ports:

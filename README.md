@@ -36,23 +36,21 @@
 
 ## 安装
 
-```bash
-git clone https://github.com/terminaterfxy/tv-transcode.git
-```
+镜像已发布，支持 x86_64 和 ARM64：`ghcr.io/terminaterfxy/tv-transcode`。
+
+1. 下载本仓库的 [`docker-compose.yml`](docker-compose.yml)。
+2. 改掉标了“改”的几处：时区、共享文件夹路径。
+3. 启动：
 
 ```bash
-cd tv-transcode
+docker compose up -d
 ```
 
-打开 `docker-compose.yml`，改掉标了“改”的几处（时区、共享文件夹路径），然后：
+群晖等 NAS 没有命令行也可以：在 Docker / Container Manager 里新建“项目”，把这份文件的内容贴进去。
 
-```bash
-docker compose up -d --build
-```
+注意：NAS 自带的“注册表”搜索查的是 Docker Hub，搜不到这个镜像；请用上面的 compose 文件安装。
 
-首次构建需要几分钟，期间要从 GitHub 下载 dovi_tool。完成后浏览器打开 `http://NAS地址:8097`。
-
-装好后先看 **设置 → 运行环境**，确认各项都是“正常”。
+完成后浏览器打开 `http://NAS地址:8097`，先看 **设置 → 运行环境**，确认各项都是“正常”。
 
 ## 怎么用
 
@@ -87,15 +85,17 @@ docker compose up -d --build
 
 ## 升级
 
+页面右上角“升级”窗口会显示有没有新版本。有的话：
+
 ```bash
-git pull
+docker compose pull
 ```
 
 ```bash
-docker compose up -d --build
+docker compose up -d
 ```
 
-也可以在页面右上角“升级”里上传新版 `app.py`：面板会在本机重新构建镜像并切换，失败自动回退。
+也可以在“升级”窗口上传新版 `app.py`：面板会在本机重新构建镜像并切换，失败自动回退。
 
 ## 安全
 
@@ -112,10 +112,12 @@ docker compose up -d --build
 - H.264、HEVC 以外的画面编码没有验证过；面板不改变画面编码。
 - 在线字幕只搜索中文字幕。
 - 英语界面不完整：后台返回的报错大多是中文。
-- 以下路径只有自动化测试，没有用真实环境验证过：双层杜比视界转换、音轨转 AC-3 的选项、`PUID` / `PGID`、桥接网络部署、ARM64。
-- 没有预先发布的镜像，需要本地构建。
+- 以下路径只有自动化测试，没有用真实环境验证过：双层杜比视界转换、音轨转 AC-3 的选项、`PUID` / `PGID`、桥接网络部署。
+- ARM64 镜像能构建出来，但没有在 ARM 设备上运行过。
 
 ## 开发
+
+想改代码：克隆仓库，把 `docker-compose.yml` 里的 `build: .` 取消注释，用 `docker compose up -d --build` 从源码构建。
 
 整个应用是一个文件：`app.py`，页面和 Dockerfile 都内嵌在里面（仓库里的 `Dockerfile` 与内嵌的那份必须一致，有测试把关）。
 
