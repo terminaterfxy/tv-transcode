@@ -7857,17 +7857,19 @@ EN_PATTERNS = [
 
 PAGE = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="darkreader-lock">
+<meta name="color-scheme" content="only dark">
 <meta name="theme-color" content="#0b0e11">
 <title>TV转码</title><style>
 /* 配色：深色、浅色各一套，其余样式只用这些变量 */
-:root{color-scheme:dark;
+:root{color-scheme:only dark;
   --bg:#000;--panel:#161617;--tile:#1f1f21;--field:#1f1f21;--ctl:rgba(255,255,255,.1);--ctl-h:rgba(255,255,255,.16);
   --seg:#48484a;--line:rgba(255,255,255,.1);--line2:rgba(255,255,255,.18);
   --text:#f5f5f7;--text2:#d2d2d7;--muted:#a1a1a6;--faint:#6e6e73;
   --accent:#2997ff;--btn:#0071e3;--btn-h:#0077ed;--ok:#30d158;--warn:#ff9f0a;--danger:#ff453a;
   --card:none;--card-h:0 0 0 1px rgba(255,255,255,.1);--nav:rgba(22,22,23,.78);--veil:rgba(0,0,0,.56);--pop:0 24px 70px rgba(0,0,0,.6);--thumb:0 1px 3px rgba(0,0,0,.4);
   --radius:18px;--h:34px}
-html[data-theme="light"]{color-scheme:light;
+html[data-theme="light"]{color-scheme:only light;
   --bg:#f5f5f7;--panel:#fff;--tile:#f5f5f7;--field:#fff;--ctl:rgba(0,0,0,.06);--ctl-h:rgba(0,0,0,.1);
   --seg:#fff;--line:rgba(0,0,0,.09);--line2:rgba(0,0,0,.18);
   --text:#1d1d1f;--text2:#424245;--muted:#6e6e73;--faint:#86868b;
@@ -8155,7 +8157,7 @@ table{width:100%;border-collapse:collapse}
   .rule-field{grid-template-columns:1fr;gap:10px}.rule-matrix{min-width:900px}
 }
 @media(max-width:560px){.mc-pick select{max-width:100%;flex:1 1 100%}.mc-pick .spacer{display:none}.sync-cue{grid-template-columns:96px minmax(0,1fr)}}
-</style><script>try{var t=localStorage.getItem('theme');if(t!=='light'&&t!=='dark')t=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';document.documentElement.dataset.theme=t}catch(e){}</script></head><body>
+</style><script>try{var t=localStorage.getItem('theme');if(t!=='light'&&t!=='dark')t=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';document.documentElement.dataset.theme=t;document.querySelector('meta[name=color-scheme]').content='only '+t}catch(e){}</script></head><body>
 <header class="topbar"><div class="topbar-in">
     <h1 class="appname">TV转码</h1>
     <nav class="pages" id="pagesNav" aria-label="页面">
@@ -9295,6 +9297,8 @@ function currentTheme(){let t='';try{t=localStorage.getItem('theme')||''}catch(e
 function applyTheme(){
   const light=currentTheme()==='light';document.documentElement.dataset.theme=light?'light':'dark';
   document.querySelector('meta[name=theme-color]').content=light?'#f5f5f7':'#000000';
+  // “only”：告诉浏览器这一页的深浅色由页面自己管，系统是深色外观时也不要自动把浅色页面调暗
+  document.querySelector('meta[name=color-scheme]').content=light?'only light':'only dark';
 }
 $('#themeToggle').onclick=()=>{try{localStorage.setItem('theme',currentTheme()==='light'?'dark':'light')}catch(e){}applyTheme()};
 applyTheme();
@@ -9302,7 +9306,7 @@ tick();setInterval(tick,2500);
 </script></body></html>"""
 
 
-APP_RELEASE = "0.10.2"        # 给人看的版本号：改了功能就加；下面的指纹是这份文件内容算出来的，用来确认装上的就是这一份
+APP_RELEASE = "0.10.3"        # 给人看的版本号：改了功能就加；下面的指纹是这份文件内容算出来的，用来确认装上的就是这一份
 
 
 def _app_version():
