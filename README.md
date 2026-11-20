@@ -36,7 +36,10 @@
 
 ## 安装
 
-镜像已发布，支持 x86_64 和 ARM64：`ghcr.io/terminaterfxy/tv-transcode`。
+镜像已发布，支持 x86_64 和 ARM64，两处内容相同：
+
+- Docker Hub：`terminaterfxy/tv-transcode`
+- GitHub：`ghcr.io/terminaterfxy/tv-transcode`
 
 1. 下载本仓库的 [`docker-compose.yml`](docker-compose.yml)。
 2. 改掉标了“改”的几处：时区、共享文件夹路径。
@@ -48,7 +51,7 @@ docker compose up -d
 
 群晖等 NAS 没有命令行也可以：在 Docker / Container Manager 里新建“项目”，把这份文件的内容贴进去。
 
-注意：NAS 自带的“注册表”搜索查的是 Docker Hub，搜不到这个镜像；请用上面的 compose 文件安装。
+在 NAS 自带的“注册表”里搜 `terminaterfxy/tv-transcode` 也能找到镜像。但直接从注册表运行需要自己填共享文件夹和 Docker 套接字的挂载，推荐用上面的 compose 文件。
 
 完成后浏览器打开 `http://NAS地址:8097`，先看 **设置 → 运行环境**，确认各项都是“正常”。
 

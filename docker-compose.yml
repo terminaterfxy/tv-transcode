@@ -6,7 +6,7 @@
 
 services:
   tv-transcode:
-    image: ghcr.io/terminaterfxy/tv-transcode:latest
+    image: terminaterfxy/tv-transcode:latest          # Docker Hub；拉不动时可换成 ghcr.io/terminaterfxy/tv-transcode:latest
     # build: .                            # 想自己从源码构建：克隆仓库后去掉这行的注释，并执行 docker compose up -d --build
     container_name: mediapanel            # 改了名字要同时设置下面的 PANEL_CONTAINER
     network_mode: host                    # 不用 host 网络时删掉这行，改用下面的 ports
