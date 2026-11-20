@@ -78,7 +78,7 @@ docker compose up -d
 | `TZ` | `Asia/Shanghai` | 时区 |
 | `PUID` / `PGID` | 不设（文件归 root） | 成品文件交给哪个用户、用户组 |
 | `PORT` | `8097` | 面板端口 |
-| `PANEL_CONTAINER` | `mediapanel` | 面板自己的容器名，升级和切换文件夹时用来找到自己 |
+| `PANEL_CONTAINER` | `tv-transcode` | 面板自己的容器名，升级和切换文件夹时用来找到自己。0.11.0 及以前默认叫 `mediapanel`，旧名字仍然认得，不用改 |
 | `MAKEMKV_CONTAINER` | `makemkv` | MakeMKV 容器名 |
 | `JELLYFIN_CONTAINER` | `jellyfin` | Jellyfin 容器名 |
 | `JELLYFIN_URL` | 同一台机器的 8096 端口 | 面板访问 Jellyfin 的地址 |

@@ -133,7 +133,8 @@ def env_number(name, default):
 
 
 # 部署时可以用环境变量改的东西；不设就是下面的默认值
-PANEL_CONTAINER = env_text("PANEL_CONTAINER", "mediapanel")     # 面板自己的容器名（升级、换文件夹时要找到自己）
+PANEL_CONTAINER = env_text("PANEL_CONTAINER", "tv-transcode")   # 面板自己的容器名（升级、换文件夹时要找到自己）
+OLD_PANEL_CONTAINER = "mediapanel"                              # 0.11.0 及以前的默认容器名：老用户没改名，升级后仍要认得
 PANEL_PORT = env_number("PORT", 8097)
 # 镜像里自带一份 dovi_tool；也可以用 DOVI_TOOL 指到别的位置
 BUNDLED_DOVI_TOOL = "/opt/tvtranscode/dovi_tool"
@@ -695,7 +696,7 @@ def recover_interrupted_upgrade(startup=True):
         import docker
         with docker.from_env() as client:
             helpers = client.containers.list(filters={
-                "name": "mediapanel-upgrader-" + str(saved.get("upgrade_id", ""))
+                "name": "-upgrader-" + str(saved.get("upgrade_id", ""))   # 新旧两种助手名都认
             })
         if not helpers:
             write_upgrade_status("failed", "上次升级被中断，当前服务已恢复，可重新升级")
@@ -933,9 +934,9 @@ except Exception as exc:
 
 
 def current_panel_container(client):
-    """找到面板自己所在的容器。群晖 --net=host 时 HOSTNAME 可能是宿主机名，所以先按约定名 mediapanel 找。"""
+    """找到面板自己所在的容器。群晖 --net=host 时 HOSTNAME 可能是宿主机名，所以先按约定名找，再按旧版的默认名找。"""
     errors = []
-    for ref in (PANEL_CONTAINER, os.environ.get("HOSTNAME")):
+    for ref in (PANEL_CONTAINER, OLD_PANEL_CONTAINER, os.environ.get("HOSTNAME")):
         if not ref:
             continue
         try:
@@ -1002,7 +1003,7 @@ def upgrade_status_binding():
 def build_and_schedule_upgrade(app_bytes, dockerfile_bytes, upgrade_id):
     """后台构建候选镜像，并启动一次性助手完成自更新与回滚。"""
     client = None
-    image_tag = f"mediapanel:update-{upgrade_id}"
+    image_tag = f"tv-transcode:update-{upgrade_id}"
     helper_started = False
     try:
         import docker
@@ -1030,7 +1031,7 @@ def build_and_schedule_upgrade(app_bytes, dockerfile_bytes, upgrade_id):
         client.containers.run(
             image_tag,
             command=["python", "-c", UPGRADE_HELPER],
-            name=f"mediapanel-upgrader-{upgrade_id}",
+            name=f"tv-transcode-upgrader-{upgrade_id}",
             detach=True,
             auto_remove=True,
             network_mode="host",
@@ -5933,7 +5934,7 @@ def remount_and_apply_folders(inbox, library, rules, notes=None):
             raise RuntimeError("认不出面板容器的挂载，无法切换")
         write_upgrade_status("ready", "正在把新文件夹接入面板", upgrade_id=upgrade_id)
         client.containers.run(
-            me.image.id, command=["python", "-c", UPGRADE_HELPER], name=f"mediapanel-upgrader-{upgrade_id}",
+            me.image.id, command=["python", "-c", UPGRADE_HELPER], name=f"tv-transcode-upgrader-{upgrade_id}",
             detach=True, auto_remove=True, network_mode="host",
             volumes={
                 "/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "rw"},
@@ -8470,7 +8471,7 @@ tick();setInterval(tick,2500);
 </script></body></html>"""
 
 
-APP_RELEASE = "0.11.0"        # 给人看的版本号：改了功能就加；下面的指纹是这份文件内容算出来的，用来确认装上的就是这一份
+APP_RELEASE = "0.11.1"        # 给人看的版本号：改了功能就加；下面的指纹是这份文件内容算出来的，用来确认装上的就是这一份
 
 
 def _app_version():

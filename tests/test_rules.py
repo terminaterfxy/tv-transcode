@@ -1149,7 +1149,7 @@ class RuleTests(unittest.TestCase):
     # ---- 给别人部署用：名字、端口可配，工具在镜像里，成品归属可指定 ----
     def test_deployment_settings_come_from_the_environment(self):
         self.assertEqual((app.PANEL_CONTAINER, app.MAKEMKV_CONTAINER, app.JELLYFIN_CONTAINER, app.PANEL_PORT, app.JELLYFIN_PORT),
-                         ("mediapanel", "makemkv", "jellyfin", 8097, 8096))             # 不设环境变量时和以前一样
+                         ("tv-transcode", "makemkv", "jellyfin", 8097, 8096))
         with patch.dict(app.os.environ, {"PORT": "9000", "X": " name "}):
             self.assertEqual((app.env_number("PORT", 8097), app.env_text("X", "d"), app.env_text("MISSING", "d")), (9000, "name", "d"))
         with patch.dict(app.os.environ, {"PORT": "abc"}):
@@ -1164,6 +1164,13 @@ class RuleTests(unittest.TestCase):
         with patch.object(app, "PANEL_CONTAINER", "my-panel"):
             self.assertEqual(app.current_panel_container(types.SimpleNamespace(containers=Containers())), "found")
         self.assertEqual(seen, ["my-panel"])
+        # 0.11.0 及以前默认叫 mediapanel：老用户不改名，升级后照样找得到自己
+        class OldContainers:
+            def get(self, ref):
+                if ref != "mediapanel":
+                    raise KeyError(ref)
+                return "old"
+        self.assertEqual(app.current_panel_container(types.SimpleNamespace(containers=OldContainers())), "old")
         # 升级助手：端口映射和标签照搬，健康检查在新容器里做
         for marker in ("PortBindings", "labels=labels or None", "ports=ports or None", "new.exec_run", "UPGRADE_PORT"):
             self.assertIn(marker, app.UPGRADE_HELPER)

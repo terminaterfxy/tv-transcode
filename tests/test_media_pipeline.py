@@ -38,7 +38,7 @@ fake_flask.request = types.SimpleNamespace()
 sys.modules.setdefault("flask", fake_flask)
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
-SPEC = importlib.util.spec_from_file_location("mediapanel_app", APP_PATH)
+SPEC = importlib.util.spec_from_file_location("tv_transcode_app", APP_PATH)
 app = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(app)
 
@@ -632,9 +632,9 @@ SINFO:0,0,21,0,"23.976 (24000/1001)"
                 "test-id",
             )
         self.assertEqual(
-            client.images.removed, [("mediapanel:update-test-id", True)]
+            client.images.removed, [("tv-transcode:update-test-id", True)]
         )
-        self.assertEqual(containers.lookups, ["mediapanel"])
+        self.assertEqual(containers.lookups, ["tv-transcode"])
         self.assertEqual(app.read_upgrade_status()["status"], "failed")
 
     def test_upgrade_helper_tracks_partial_switch_for_safe_rollback(self):

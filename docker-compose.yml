@@ -8,7 +8,7 @@ services:
   tv-transcode:
     image: terminaterfxy/tv-transcode:latest          # Docker Hub；拉不动时可换成 ghcr.io/terminaterfxy/tv-transcode:latest
     # build: .                            # 想自己从源码构建：克隆仓库后去掉这行的注释，并执行 docker compose up -d --build
-    container_name: mediapanel            # 改了名字要同时设置下面的 PANEL_CONTAINER
+    container_name: tv-transcode           # 改了名字要同时设置下面的 PANEL_CONTAINER
     network_mode: host                    # 不用 host 网络时删掉这行，改用下面的 ports
     # ports:
     #   - "8097:8097"
@@ -17,7 +17,7 @@ services:
       TZ: Asia/Shanghai                   # 改：你的时区
       # PUID: "1000"                      # 成品文件交给哪个用户、用户组；不设则归 root
       # PGID: "1000"
-      # PANEL_CONTAINER: mediapanel       # 面板容器名（默认 mediapanel）
+      # PANEL_CONTAINER: tv-transcode     # 面板容器名（默认 tv-transcode）
       # PORT: "8097"                      # 面板端口（默认 8097）
       # MAKEMKV_CONTAINER: makemkv        # 读盘工具容器名（默认 makemkv）
       # JELLYFIN_CONTAINER: jellyfin      # Jellyfin 容器名（默认 jellyfin）
