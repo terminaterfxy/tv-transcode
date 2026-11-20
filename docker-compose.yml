@@ -1,6 +1,6 @@
 # TV转码：把下载的影片整理成电视（经 Jellyfin）能直接播放的格式。
 # 用法：改好下面标了“改”的几处，然后 docker compose up -d，浏览器打开 http://NAS地址:8097
-# 群晖等 NAS：在 Docker / Container Manager 里新建“项目”，把这份文件贴进去即可。
+# 群晖 DSM 7.2 及以上：在 Container Manager 里新建“项目”，把这份文件贴进去即可。详见 使用说明.md
 #
 # 安全：面板没有登录，并且拿着 Docker 套接字（等于这台机器的最高权限）。只在家里局域网用，不要映射到公网。
 

@@ -49,9 +49,11 @@
 docker compose up -d
 ```
 
-群晖等 NAS 没有命令行也可以：在 Docker / Container Manager 里新建“项目”，把这份文件的内容贴进去。
+群晖 DSM 7.2 及以上没有命令行也可以：在 Container Manager 里新建“项目”，把这份文件的内容贴进去。更早的 DSM 请用一条 `docker run` 命令安装。
 
-在 NAS 自带的“注册表”里搜 `terminaterfxy/tv-transcode` 也能找到镜像。但直接从注册表运行需要自己填共享文件夹和 Docker 套接字的挂载，推荐用上面的 compose 文件。
+**每一步的详细做法、装好后先做什么、平时怎么用，见 [使用说明](使用说明.md)。**
+
+在 NAS 自带的“注册表”里搜 `terminaterfxy` 也能找到镜像。但直接从注册表运行需要自己填共享文件夹和 Docker 套接字的挂载，推荐用上面的 compose 文件。
 
 完成后浏览器打开 `http://NAS地址:8097`，先看 **设置 → 运行环境**，确认各项都是“正常”。
 
