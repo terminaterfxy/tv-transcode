@@ -1,0 +1,40 @@
+# TV转码：把下载的影片整理成电视（经 Jellyfin）能直接播放的格式。
+# 用法：改好下面标了“改”的几处，然后 docker compose up -d，浏览器打开 http://NAS地址:8097
+#
+# 安全：面板没有登录，并且拿着 Docker 套接字（等于这台机器的最高权限）。只在家里局域网用，不要映射到公网。
+
+services:
+  tv-transcode:
+    build: .                              # 从本目录的 Dockerfile 和 app.py 构建
+    image: tv-transcode
+    container_name: mediapanel            # 改了名字要同时设置下面的 PANEL_CONTAINER
+    network_mode: host                    # 不用 host 网络时删掉这行，改用下面的 ports
+    # ports:
+    #   - "8097:8097"
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai                   # 改：你的时区
+      # PUID: "1000"                      # 成品文件交给哪个用户、用户组；不设则归 root
+      # PGID: "1000"
+      # PANEL_CONTAINER: mediapanel       # 面板容器名（默认 mediapanel）
+      # PORT: "8097"                      # 面板端口（默认 8097）
+      # MAKEMKV_CONTAINER: makemkv        # 读盘工具容器名（默认 makemkv）
+      # JELLYFIN_CONTAINER: jellyfin      # Jellyfin 容器名（默认 jellyfin）
+      # JELLYFIN_URL: http://192.168.1.10:8096        # 面板访问 Jellyfin 的地址（默认：同一台机器的 8096 端口）
+      # JELLYFIN_PUBLIC_URL: http://192.168.1.10:8096 # 页面上“Jellyfin”按钮打开的地址（默认同上）
+      # MEDIAPANEL_ALLOWED_HOSTS: nas.example.lan     # 用域名访问面板时，把域名加在这里（逗号分隔）
+    volumes:
+      - /path/to/media:/share             # 改：放影片的共享文件夹。里面默认用 download（下载）和 Movies（成品），可在设置页改
+      - /var/run/docker.sock:/var/run/docker.sock   # 升级、选择未挂载的文件夹、调用读盘工具都要用
+
+  # 读盘工具：读取蓝光原盘（BDMV 文件夹、ISO）时用。不处理原盘可以整段删掉。
+  # MakeMKV 是第三方软件，这里用的是社区镜像和它的免费测试版密钥，请自行了解其许可。
+  makemkv:
+    image: jlesage/makemkv
+    container_name: makemkv
+    restart: unless-stopped
+    environment:
+      MAKEMKV_KEY: BETA
+    volumes:
+      - /path/to/makemkv-config:/config   # 改：随便一个空文件夹
+      - /path/to/media:/share             # 改：必须和上面是同一个文件夹、同一个容器内路径
