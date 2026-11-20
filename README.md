@@ -37,7 +37,7 @@
 ## 安装
 
 ```bash
-git clone <本仓库地址> tv-transcode
+git clone https://github.com/terminaterfxy/tv-transcode.git
 ```
 
 ```bash
