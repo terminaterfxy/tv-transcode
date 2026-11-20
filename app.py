@@ -5876,6 +5876,7 @@ def api_state():
             "makemkv_update": dict(MAKEMKV_UPDATE),
             "app_version": globals().get("APP_VERSION", ""),
             "help_url": f"https://github.com/{PROJECT_REPO}/blob/main/使用说明.md",
+            "jellyfin": {"available": jellyfin_available(getattr(request, "host", "")), "has_key": bool(jellyfin_api_key())},
             "jellyfin_link": env_text("JELLYFIN_PUBLIC_URL"), "jellyfin_port": JELLYFIN_PORT,
             "folders": {"inbox": INBOX.name, "library": MOVIES.name, **{key + "_path": value for key, value in current_folders().items()}},
             "release": globals().get("APP_RELEASE", ""),
@@ -7339,6 +7340,56 @@ def subtitle_request_context(data):
     return {"name": name, "output": output, "key": key, "base": base, "hint": hint}, None
 
 
+JELLYFIN_SEEN = {"base": "", "at": 0.0, "available": None, "checking": False}
+JELLYFIN_CHECK_SECONDS = 60
+
+
+def jellyfin_reachable(base):
+    """Jellyfin 现在连不连得上（不需要密钥）。"""
+    try:
+        with urlrequest.urlopen(base + "/System/Info/Public", timeout=4) as response:
+            return response.status == 200
+    except Exception:
+        return False
+
+
+def jellyfin_available(request_host=""):
+    """给页面用：Jellyfin 在不在。True / False，还没查出来时是 None。
+
+    每分钟在后台查一次，不让页面的状态请求等它。没有 Jellyfin 的人照样能用转换，只是字幕搜索等功能置灰。
+    """
+    try:
+        base = jellyfin_base_url(request_host)
+    except JellyfinError:
+        return None
+    with LOCK:
+        seen = JELLYFIN_SEEN
+        if seen["base"] != base:
+            seen.update(base=base, at=0.0, available=None)
+        stale = time.time() - seen["at"] > JELLYFIN_CHECK_SECONDS
+        if stale and not seen["checking"]:
+            seen["checking"] = True
+        else:
+            return seen["available"]
+    def check():
+        found = jellyfin_reachable(base)
+        with LOCK:
+            if JELLYFIN_SEEN["base"] == base:
+                JELLYFIN_SEEN.update(available=found, at=time.time())
+            JELLYFIN_SEEN["checking"] = False
+    threading.Thread(target=check, daemon=True).start()
+    with LOCK:
+        return JELLYFIN_SEEN["available"]
+
+
+def sidecar_language(filename):
+    """从“片名.chi.srt”这样的文件名里认出语言，给没有 Jellyfin 时的字幕列表用。"""
+    parts = filename.rsplit(".", 2)
+    token = parts[1].lower() if len(parts) == 3 else ""
+    return {"zh-cn": "中文", "zh": "中文", "zh-tw": "中文", "en": "英语", "ja": "日语", "ko": "韩语"}.get(
+        token, LANGUAGE_LABELS.get(token, token or "未标语言"))
+
+
 def jellyfin_movie_or_error(ctx):
     movie = jellyfin_find_movie(ctx["base"], ctx["key"], ctx["output"])
     if not movie:
@@ -7423,15 +7474,35 @@ def refresh_jellyfin_for(name):
 
 @app.post("/api/subtitles/list")
 def api_subtitles_list():
-    ctx, error = subtitle_request_context(request.get_json(silent=True) or {})
-    if error:
-        return error
-    try:
-        movie = jellyfin_movie_or_error(ctx)
-        streams = jellyfin_subtitle_streams(ctx, movie)
-    except JellyfinError as exc:
-        return jsonify({"error": str(exc), "needs_key": exc.needs_key}), 502
-    output = ctx["output"]
+    """这部片现有的字幕。连得上 Jellyfin 时把它那边的也列出来；连不上或没配密钥时只列影片旁边的文件。"""
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name", ""))
+    with LOCK:
+        it = ITEMS.get(name)
+        if not it or it["status"] != "done":
+            return jsonify({"error": "影片入库后才能管理字幕"}), 409
+    output = tracked_movie_output(name)
+    if output is None:
+        return jsonify({"error": "影片文件夹里找不到这部片"}), 409
+    movie, streams, note, needs_key = None, [], "", False
+    if str(data.get("api_key", "")).strip() or jellyfin_api_key():
+        ctx, error = subtitle_request_context(data)
+        if error:
+            return error
+        try:
+            movie = jellyfin_movie_or_error(ctx)
+            streams = jellyfin_subtitle_streams(ctx, movie)
+        except JellyfinError as exc:
+            if exc.needs_key:
+                return jsonify({"error": str(exc), "needs_key": True}), 502
+            movie, streams, note = None, [], str(exc)
+    else:
+        try:
+            needs_key = jellyfin_reachable(jellyfin_base_url(getattr(request, "host", "")))
+        except JellyfinError:
+            needs_key = False
+        note = "填入 Jellyfin 的 API 密钥后，可以在线搜索字幕" if needs_key else "没有检测到 Jellyfin：只能管理影片旁边的字幕，在线搜索不可用"
+    ctx = {"name": name, "output": output}
     with LOCK:
         record = dict(PROCESSED.get(ctx["name"]) or {})
     exported = {Path(x).name for x in record.get("sidecars") or []}
@@ -7468,14 +7539,19 @@ def api_subtitles_list():
             seen_local.add(filename)
         language = LANGUAGE_LABELS.get(str(stream.get("Language") or "").lower(), stream.get("Language") or "未标语言")
         existing.append(describe(filename, language, stream.get("Index"), path if inside_jellyfin else ""))
-    for filename in beside:                # 刚放到影片旁边、Jellyfin 还没发现的
+    for filename in beside:                # 刚放到影片旁边、Jellyfin 还没发现的；没有 Jellyfin 时全部走这里
         if filename not in seen_local:
-            existing.append(describe(filename, "Jellyfin 还没读到", None))
+            existing.append(describe(filename, "Jellyfin 还没读到" if movie else sidecar_language(filename), None))
+    if not movie:
+        with LOCK:
+            probe = (OUTPUT_INFO.get(Path(output)) or {}).get("probe") or {}
+        return jsonify({"ok": True, "existing": existing, "embedded": len(probe.get("subs") or []), "jellyfin": False,
+                        "jellyfin_note": note, "needs_key": needs_key, "title": "", "recognised": False})
     embedded = sum(1 for stream in streams if not stream.get("IsExternal"))
     with LOCK:
         JELLYFIN_EXTERNAL_SUBS[str(Path(output).resolve())] = len(existing)
     ids = movie.get("ProviderIds") or {}
-    return jsonify({"ok": True, "existing": existing, "embedded": embedded,
+    return jsonify({"ok": True, "existing": existing, "embedded": embedded, "jellyfin": True,
                     "title": str(movie.get("Name") or ""), "recognised": bool(ids.get("Tmdb") or ids.get("Imdb"))})
 
 
@@ -7567,15 +7643,26 @@ def api_subtitles_download():
 def api_subtitles_delete():
     """删掉这部片的一份外挂字幕。只删外挂的；装在影片文件里的删不了，也不会去动。"""
     data = request.get_json(silent=True) or {}
-    ctx, error = subtitle_request_context(data)
-    if error:
-        return error
     index, filename = data.get("index"), str(data.get("filename") or "")
-    local = {f.name: f for f in local_sidecars(ctx["output"])}
+    name = str(data.get("name", ""))
+    with LOCK:
+        known = ITEMS.get(name)
+        if not known or known["status"] != "done":
+            return jsonify({"error": "影片入库后才能管理字幕"}), 409
+    output = tracked_movie_output(name)
+    if output is None:
+        return jsonify({"error": "影片文件夹里找不到这部片"}), 409
+    local = {f.name: f for f in local_sidecars(output)}
     if filename not in local and (isinstance(index, bool) or not isinstance(index, int)):
         return jsonify({"error": "请选择要删除的字幕"}), 400
+    if filename in local:
+        ctx = {"name": name, "output": output}       # 影片旁边的文件面板自己删，不用 Jellyfin
+    else:
+        ctx, error = subtitle_request_context(data)
+        if error:
+            return error
     try:
-        movie = jellyfin_movie_or_error(ctx)
+        movie = None if filename in local else jellyfin_movie_or_error(ctx)
         if filename in local:
             # 影片旁边的文件由面板自己删：NAS 实测让 Jellyfin 去删会报 500（它对影片文件夹没有写权限）
             try:
@@ -7590,6 +7677,7 @@ def api_subtitles_delete():
                         record["subtitle_sidecar"] = None
                     record["sidecars"] = [x for x in record.get("sidecars") or [] if Path(x).name != filename]
                     save_state()
+            refresh_jellyfin_for(name)               # 有 Jellyfin 就顺手通知它；没有也不要紧
             if len(local) == 1:
                 # 影片旁边已经没有字幕了：把转换前备下的那份也清掉，免得重做时又被放回去
                 stale = subtitle_candidate_path(ctx["name"])
@@ -7598,7 +7686,6 @@ def api_subtitles_delete():
                         leftover.unlink()
                     except OSError:
                         pass
-            jellyfin_refresh(ctx, movie)
         else:
             target = next((s for s in jellyfin_subtitle_streams(ctx, movie) if s.get("Index") == index), None)
             if not target or not target.get("IsExternal"):
@@ -7814,7 +7901,9 @@ EN_TEXT = {
     "包括带 Atmos 元数据的 TrueHD 音轨。": "Includes TrueHD tracks with Atmos metadata.",
     "包括 Dolby Digital Plus Atmos。": "Includes Dolby Digital Plus Atmos.", "MP4 输出只保留兼容轨。": "MP4 output keeps only the compatible track.",
     "匹配上方未列出的编码。": "Matches codecs not listed above.",
-    "切换语言": "Switch language", "杜比全景声": "Dolby Atmos", "无损音质": "Lossless", "使用说明": "Guide", "入库之后": "After import", "电视播放不正常": "If playback is wrong on your TV",
+    "切换语言": "Switch language", "需要 Jellyfin": "Requires Jellyfin", "没有检测到 Jellyfin": "Jellyfin not detected",
+    "填入 Jellyfin 的 API 密钥后，可以在线搜索字幕": "Enter a Jellyfin API key to search subtitles online",
+    "没有检测到 Jellyfin：只能管理影片旁边的字幕，在线搜索不可用": "Jellyfin not detected: only subtitles next to the movie can be managed; online search is unavailable", "杜比全景声": "Dolby Atmos", "无损音质": "Lossless", "使用说明": "Guide", "入库之后": "After import", "电视播放不正常": "If playback is wrong on your TV",
     "Jellyfin 的媒体库指向“影片文件夹”；下载工具的保存位置设为“下载文件夹”。两个文件夹在“媒体目录”里查看和修改。":
         "Point the Jellyfin library at the Library folder and your download tool at the Download folder. Both are shown and changed under Folders.",
     "把影片下载到“下载文件夹”。下载完成后，“影片”页自动出现一张卡片。": "Download a movie into the Download folder. When it finishes, a card appears on the Movies page.",
@@ -8102,6 +8191,8 @@ table{width:100%;border-collapse:collapse}
 .sub-row>div:first-child{flex:1;min-width:0}
 .sub-row strong{display:block;font-size:13px;font-weight:600;line-height:1.4;overflow-wrap:anywhere}
 .sub-row span{display:block;margin-top:2px;color:var(--muted);font-size:12px}
+#subtitleOnline.off .sub-head,#subtitleOnline.off .subtitle-list{opacity:.45}
+a.ghost.off{opacity:.36;pointer-events:none}
 .sub-row .tag-good{color:var(--ok)}.sub-row .tag-warn{color:var(--warn)}
 .sub-row button{height:30px;padding:0 13px;font-size:12px}
 .subtitle-choice{width:100%;display:flex;align-items:center;gap:12px;color:var(--text);text-align:left;transition:background-color .15s ease}
@@ -8302,8 +8393,10 @@ table{width:100%;border-collapse:collapse}
     <div id="subtitleSections">
       <h3 class="sub-head">现有字幕</h3>
       <div class="subtitle-list" id="subtitleExisting"></div>
+      <div id="subtitleOnline">
       <h3 class="sub-head">在线字幕<button class="ghost" id="subtitleSearchBtn" type="button">搜索</button></h3>
       <div class="subtitle-list" id="subtitleResults"><div class="subtitle-list-status">点击“搜索”列出可下载的中文字幕。</div></div>
+      </div>
     </div>
     <div class="dialog-actions subtitle-picker-actions">
       <button class="ghost" id="subtitleLocal" type="button">从电脑上传</button>
@@ -8719,7 +8812,10 @@ async function loadExistingSubtitles(){
     const res=await subtitleCall('/api/subtitles/list');
     if(!pendingSubtitle||pendingSubtitle.name!==item.name)return;
     const shownTitle='<span data-no-translate>'+esc(res.title)+'</span>';
-    $('#subtitleNote').innerHTML=res.recognised?'Jellyfin 里的片名：'+shownTitle:'Jellyfin 未识别此影片（显示为“'+shownTitle+'”）。请先在 Jellyfin 中执行 ⋮ → 识别。';
+    // 没有 Jellyfin（或还没填密钥）：影片旁边的字幕照常能管，在线搜索那一栏置灰
+    $('#subtitleOnline').classList.toggle('off',!res.jellyfin);$('#subtitleSearchBtn').disabled=!res.jellyfin;
+    if(!res.jellyfin)$('#subtitleResults').innerHTML='<div class="subtitle-list-status">需要 Jellyfin</div>';
+    $('#subtitleNote').innerHTML=!res.jellyfin?esc(res.jellyfin_note||''):res.recognised?'Jellyfin 里的片名：'+shownTitle:'Jellyfin 未识别此影片（显示为“'+shownTitle+'”）。请先在 Jellyfin 中执行 ⋮ → 识别。';
     const rows=res.existing.map(x=>subRow(x.origin+(x.when?' · '+x.when:''),'<span>'+esc(x.filename)+' · '+esc(x.language)+(x.size_h?' · '+esc(x.size_h):'')+'</span>',
       (x.sync_id?'<button class="ghost" data-sync="'+esc(x.sync_id)+'" type="button">校准时间</button>':'')+
       '<button class="danger" data-delsub="'+(x.index==null?'':x.index)+'" data-delname="'+esc(x.beside_movie?x.filename:'')+'" type="button">删除</button>'));
@@ -8819,6 +8915,8 @@ function renderDisk(){
 function renderUpgrade(){
   const notice=$('#pipelineNotice');notice.textContent=state.processing_block_reason||'';notice.style.display=state.processing_block_reason?'block':'none';
   $('#jellyfinLink').href=state.jellyfin_link||(location.protocol+'//'+location.hostname+':'+(state.jellyfin_port||8096));
+  const noJellyfin=(state.jellyfin||{}).available===false;        // 明确查到连不上才置灰；还没查出来时不动
+  $('#jellyfinLink').classList.toggle('off',noJellyfin);$('#jellyfinLink').title=noJellyfin?'没有检测到 Jellyfin':'';
   const u=state.upgrade||{},active=['accepted','building','ready','switching'].includes(u.status);
   const busy=!!state.job||(state.queue||[]).length>0;
   $('#upgradeOpen').disabled=active||busy;
@@ -9306,7 +9404,7 @@ tick();setInterval(tick,2500);
 </script></body></html>"""
 
 
-APP_RELEASE = "0.10.3"        # 给人看的版本号：改了功能就加；下面的指纹是这份文件内容算出来的，用来确认装上的就是这一份
+APP_RELEASE = "0.10.4"        # 给人看的版本号：改了功能就加；下面的指纹是这份文件内容算出来的，用来确认装上的就是这一份
 
 
 def _app_version():

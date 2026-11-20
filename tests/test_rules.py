@@ -1,5 +1,6 @@
 """2026-11-17 起的转换规则：以 LG G5 实测支持表为依据，只留一条音轨和中文字幕。"""
 import shutil
+import time
 import subprocess
 import sys
 import json
@@ -1231,6 +1232,43 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(texts(hd), ["1080p", "SDR", "立体声"])
         self.assertEqual(app.media_badges(None), [])
         self.assertIn("mc-badges", app.PAGE)
+
+    def test_subtitles_can_be_managed_without_jellyfin(self):
+        # 没装 Jellyfin 的人：字幕窗口不能卡在“请填密钥”，影片旁边的字幕要照常能看、能删
+        output = self.done_movie()
+        (self.movies / "movie.chi.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\n你好\n", "utf-8")
+        (self.movies / "movie.en.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nhi\n", "utf-8")
+        def call(endpoint, body):
+            req = types.SimpleNamespace(get_json=lambda **kw: body, host="nas.local:8097")
+            with patch.object(app, "request", req), patch.object(app, "jellyfin_reachable", lambda base: False):
+                return endpoint()
+        listed = call(app.api_subtitles_list, {"name": "movie.mkv"})
+        self.assertFalse(listed["jellyfin"]); self.assertFalse(listed["needs_key"])
+        self.assertIn("没有检测到 Jellyfin", listed["jellyfin_note"])
+        rows = {x["filename"]: x for x in listed["existing"]}
+        self.assertEqual(sorted(rows), ["movie.chi.srt", "movie.en.srt"])
+        self.assertEqual((rows["movie.chi.srt"]["language"], rows["movie.en.srt"]["language"]), ("中文", "英语"))
+        self.assertEqual(rows["movie.chi.srt"]["sync_id"], app.LOCAL_SUBTITLE_PREFIX + "movie.chi.srt")   # 也能校准
+        # Jellyfin 在、只是没填密钥：提示填密钥，本地字幕照样列出来
+        req = types.SimpleNamespace(get_json=lambda **kw: {"name": "movie.mkv"}, host="nas.local:8097")
+        with patch.object(app, "request", req), patch.object(app, "jellyfin_reachable", lambda base: True):
+            waiting = app.api_subtitles_list()
+        self.assertTrue(waiting["needs_key"]); self.assertEqual(len(waiting["existing"]), 2)
+        self.assertEqual(call(app.api_subtitles_delete, {"name": "movie.mkv", "filename": "movie.en.srt"})["ok"], True)
+        self.assertFalse((self.movies / "movie.en.srt").exists()); self.assertTrue(output.exists())
+        self.assertEqual(call(app.api_subtitles_delete, {"name": "movie.mkv", "index": 3})[1], 428)        # Jellyfin 里的那种才需要密钥
+
+    def test_jellyfin_presence_is_checked_in_the_background(self):
+        app.JELLYFIN_SEEN.update(base="", at=0.0, available=None, checking=False)
+        with patch.object(app, "jellyfin_reachable", lambda base: False):
+            app.jellyfin_available("nas.local:8097")
+            for _ in range(50):
+                if not app.JELLYFIN_SEEN["checking"] and app.JELLYFIN_SEEN["at"]:
+                    break
+                time.sleep(0.02)
+            self.assertIs(app.jellyfin_available("nas.local:8097"), False)
+        self.assertIsNone(app.jellyfin_available(""))                       # 不知道地址：不下结论
+        self.assertIn("a.ghost.off", app.PAGE)
 
     def test_latest_version_is_read_from_the_project_tags(self):
         self.assertEqual(app.version_key("v0.10.0"), (0, 10, 0))
